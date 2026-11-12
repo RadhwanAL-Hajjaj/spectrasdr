@@ -29,6 +29,16 @@ class CounterMarkerSync(
     var timedOut = false
         private set
 
+    /** Number of marker bursts that have ended since this sync was created. */
+    @Volatile
+    var bursts = 0L
+        private set
+
+    /** Number of retune boundaries that were decided by the timeout instead of a marker. */
+    @Volatile
+    var timeouts = 0
+        private set
+
     override fun wrap(commands: List<TimedCommand>): List<TimedCommand> = commands +
         TimedCommand(RtlTcpProtocol.SET_TEST_MODE, 1) +
         TimedCommand(RtlTcpProtocol.SET_TEST_MODE, 0, markerGapMs)
@@ -58,6 +68,8 @@ class CounterMarkerSync(
             } else {
                 if (inBurst) {
                     inBurst = false
+                    bursts++
+                    scanned = 0   // the timeout counts from the last completed burst
                     expected--
                     if (expected <= 0) {
                         expected = 0
@@ -79,6 +91,7 @@ class CounterMarkerSync(
                 run = 0
                 last = -1
                 timedOut = true
+                timeouts++
                 return (i + bps - 1) / bps * bps
             }
         }

@@ -59,6 +59,8 @@ class CounterMarkerSyncTest {
         val first = stream(1_000, 3_000, 1_000)
         val data = first + stream(1_000, 3_000, 1_000, Random(9))
         assertEquals(first.size + 4_000, scanAll(sync, data, 512))
+        assertEquals(2L, sync.bursts)
+        assertEquals(0, sync.timeouts)
     }
 
     @Test
@@ -80,6 +82,8 @@ class CounterMarkerSyncTest {
         val data = ByteArray(300_000) { rnd.nextInt(256).toByte() }
         assertEquals(200_000, sync.scan(data, 0, data.size))
         assertTrue(sync.timedOut)
+        assertEquals(1, sync.timeouts)
+        assertEquals(0L, sync.bursts)
     }
 
     @Test

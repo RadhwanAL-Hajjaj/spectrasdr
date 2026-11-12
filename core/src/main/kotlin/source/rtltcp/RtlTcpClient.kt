@@ -72,8 +72,24 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     val syncMode: RetuneSyncMode
         get() = when (sync) {
             is CounterMarkerSync -> RetuneSyncMode.MARKER
+            is LatencySync -> RetuneSyncMode.LATENCY
             else -> RetuneSyncMode.IMMEDIATE
         }
+
+    /** Last measured command-to-stream latency in samples (latency probe), if any. */
+    @Volatile
+    var retuneLatencySamples: Long? = null
+        private set
+
+    /** Number of latency probes completed. */
+    @Volatile
+    var probeCount = 0
+        private set
+
+    @Volatile private var probeRequested = false
+
+    /** Retune boundaries that fell back to the marker timeout (diagnostics). */
+    val markerTimeouts: Int get() = (sync as? CounterMarkerSync)?.timeouts ?: 0
 
     @Volatile private var running = false
     @Volatile private var closed = false
@@ -302,8 +318,21 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     private fun chooseSync(): RetuneSync = when (config.retuneSync) {
         RetuneSyncMode.IMMEDIATE -> ImmediateSync()
         RetuneSyncMode.MARKER -> CounterMarkerSync()
+        RetuneSyncMode.LATENCY -> latencySync(null).also { probeRequested = true }
         RetuneSyncMode.AUTO ->
-            if (rspCapabilities == null && supports(RtlTcpProtocol.SET_TEST_MODE)) CounterMarkerSync() else ImmediateSync()
+            if (rspCapabilities == null && supports(RtlTcpProtocol.SET_TEST_MODE)) CounterMarkerSync()
+            else latencySync(null).also { probeRequested = true }
+    }
+
+    /** Settle from a measured latency (x1.5, at least 10 ms) or the per-kind default. */
+    private fun latencySync(measured: Long?): LatencySync {
+        val defaultMs = if (config.kind == SourceKind.ANDROID_DRIVER) 120L else 250L
+        val settle = measured?.let { maxOf((it * 1.5).toLong(), sampleRate / 100L) } ?: (sampleRate * defaultMs / 1000)
+        return LatencySync(settle)
+    }
+
+    override fun recalibrate() {
+        probeRequested = true
     }
 
     /** Re-applies every setting as one synchronised retune, so the first blocks are already correct. */
@@ -338,6 +367,13 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         var seq = 0L
         try {
             while (running) {
+                if (probeRequested && !discarding && have == 0) {
+                    probeRequested = false
+                    block?.let { if (it.length > 0) listener.onBlock(it) else it.release() }
+                    block = null
+                    runProbe(input)
+                    continue
+                }
                 val n = input.read(buf, have, buf.size - have)
                 if (n < 0) throw EOFException()
                 have += n
@@ -367,6 +403,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                         activeEpoch = observedEpoch
                         activeCenterHz = pendingCenterHz
                         activeRate = pendingRate
+                        val marker = sync as? CounterMarkerSync
+                        if (marker != null && marker.timedOut && marker.bursts == 0L) {
+                            synchronized(tuneLock) { sync = latencySync(retuneLatencySamples) }
+                            probeRequested = true
+                        }
                         continue
                     }
                     val b = block ?: pool.obtain().also {
@@ -420,6 +461,77 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
             if (c.hasNotches) add(OptionKind.RSP_NOTCHES)
         },
     )
+
+    /**
+     * Measures command-to-stream latency (§7.1 step 3): set a high gain and wait 1 s, measure the
+     * baseline power over 50 ms, step to a low gain and count samples until the power falls ≥ 10 dB.
+     * Ends with a synchronised retune that restores the user's gain. Samples read here are discarded.
+     */
+    private fun runProbe(input: DataInputStream) {
+        val chunk = 4096
+        val bytes = ByteArray(chunk * format.bytesPerComplex)
+        val floats = FloatArray(chunk * 2)
+        fun readChunk(): Int {
+            input.readFully(bytes)
+            return SampleConverter.convert(format, bytes, 0, bytes.size, floats, 0, chunk)
+        }
+        val (high, low) = probeGainCommands()
+        if (!sendNow(high)) return
+        var skipped = 0L
+        while (skipped < sampleRate) skipped += readChunk()
+        var acc = 0.0
+        var count = 0
+        val baselineSamples = maxOf(sampleRate / 20, chunk)
+        while (count < baselineSamples) {
+            val n = readChunk()
+            for (k in 0 until n) acc += floats[2 * k] * floats[2 * k] + floats[2 * k + 1] * floats[2 * k + 1]
+            count += n
+        }
+        val detector = PowerStepDetector().apply { baseline = acc / count }
+        if (!sendNow(low)) return
+        var since = 0L
+        var measured: Long? = null
+        while (since < 2L * sampleRate) {
+            val n = readChunk()
+            val idx = detector.feed(floats, n)
+            if (idx >= 0) {
+                measured = since + idx
+                break
+            }
+            since += n
+        }
+        if (measured != null) retuneLatencySamples = measured
+        synchronized(tuneLock) { sync = latencySync(measured ?: retuneLatencySamples) }
+        probeCount++
+        retune(restoreGainCommands() + TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(currentCenterHz))) {}
+    }
+
+    /** Writes [cmds] and waits until they are on the wire. */
+    private fun sendNow(cmds: List<TimedCommand>): Boolean = runCatching {
+        commands.submit { cmds.forEach { writeCommand(it.command, it.param) } }.get(2, TimeUnit.SECONDS)
+    }.isSuccess
+
+    /** (high gain, low gain) command lists for the probe. */
+    private fun probeGainCommands(): Pair<List<TimedCommand>, List<TimedCommand>> {
+        val caps = rspCapabilities
+        if (caps != null) {
+            return listOf(
+                TimedCommand(RtlTcpProtocol.RSP_SET_AGC, 0),
+                TimedCommand(RtlTcpProtocol.RSP_SET_IF_GAIN_R, caps.ifgrMin),
+            ) to listOf(TimedCommand(RtlTcpProtocol.RSP_SET_IF_GAIN_R, caps.ifgrMax))
+        }
+        val gains = dongle?.tunerType?.gainsTenthsDb.orEmpty()
+        val hi = gains.maxOrNull() ?: 400
+        val lo = gains.minOrNull() ?: 0
+        return listOf(
+            TimedCommand(RtlTcpProtocol.SET_GAIN_MODE, 1),
+            TimedCommand(RtlTcpProtocol.SET_GAIN, hi),
+        ) to listOf(TimedCommand(RtlTcpProtocol.SET_GAIN, lo))
+    }
+
+    private fun restoreGainCommands(): List<TimedCommand> = lastGain?.let { gainCommands(it) }
+        ?: if (rspCapabilities != null) listOf(TimedCommand(RtlTcpProtocol.RSP_SET_AGC, 1))
+        else listOf(TimedCommand(RtlTcpProtocol.SET_GAIN_MODE, 0))
 
     companion object {
         val RSP_SAMPLE_RATES = listOf(2_000_000, 3_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000)

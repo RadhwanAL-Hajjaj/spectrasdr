@@ -5,7 +5,7 @@ package io.github.radhwanalhajjaj.spectrasdr.core.source.rtltcp
 data class TimedCommand(val command: Int, val param: Int, val delayBeforeMs: Long = 0)
 
 /** How [RtlTcpClient] finds where a retune takes effect in the stream (§7.1). */
-enum class RetuneSyncMode { AUTO, IMMEDIATE, MARKER }
+enum class RetuneSyncMode { AUTO, IMMEDIATE, MARKER, LATENCY }
 
 /**
  * Locates retune boundaries in the byte stream. [wrap] runs on the caller's thread; the other
