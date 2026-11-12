@@ -6,13 +6,16 @@ package io.github.radhwanalhajjaj.spectrasdr.core.source.rtltcp
  * commands, test mode goes on and, [markerGapMs] later, off. In test mode the chip sends an
  * incrementing byte counter, and commands execute in order, so new-frequency samples begin where
  * the last expected burst ends (plus a [guardMs] guard). A burst is ≥ [minRun] consecutive
- * incrementing bytes.
+ * incrementing bytes. A retune times out only after [timeoutMs] of stream AND [timeoutMs] of wall-clock
+ * time since the request or the last burst: for real-time sources the two limits coincide, and the
+ * wall-clock limit keeps buffered pre-retune samples from counting as waiting.
  */
 class CounterMarkerSync(
     private val minRun: Int = 64,
     private val guardMs: Double = 1.0,
     private val timeoutMs: Double = 1_000.0,
     private val markerGapMs: Long = 5,
+    private val nanoTime: () -> Long = System::nanoTime,
 ) : RetuneSync() {
     private var expected = 0
     private var run = 0
@@ -23,6 +26,8 @@ class CounterMarkerSync(
     private var scanned = 0L
     private var timeoutBytes = Long.MAX_VALUE
     private var bps = 2
+    private var armedAtNanos = 0L
+    private val timeoutNanos = (timeoutMs * 1e6).toLong()
 
     /** True once a retune finished by timeout instead of a marker: the server ignores test mode. */
     @Volatile
@@ -49,11 +54,13 @@ class CounterMarkerSync(
         guardTotal = (guardMs / 1000.0 * sampleRate).toInt() * bytesPerSample
         timeoutBytes = (timeoutMs / 1000.0 * sampleRate).toLong() * bytesPerSample
         scanned = 0
+        armedAtNanos = nanoTime()
         guardLeft = 0
     }
 
     override fun scan(bytes: ByteArray, off: Int, len: Int): Int {
         var i = 0
+        var wallExpired = nanoTime() - armedAtNanos >= timeoutNanos
         while (i < len) {
             if (guardLeft > 0) {
                 val take = minOf(guardLeft, len - i)
@@ -70,6 +77,8 @@ class CounterMarkerSync(
                     inBurst = false
                     bursts++
                     scanned = 0   // the timeout counts from the last completed burst
+                    armedAtNanos = nanoTime()
+                    wallExpired = false
                     expected--
                     if (expected <= 0) {
                         expected = 0
@@ -86,7 +95,7 @@ class CounterMarkerSync(
             }
             last = v
             i++
-            if (++scanned >= timeoutBytes && !inBurst) {
+            if (++scanned >= timeoutBytes && wallExpired && !inBurst) {
                 expected = 0
                 run = 0
                 last = -1

@@ -2,6 +2,7 @@
 package io.github.radhwanalhajjaj.spectrasdr.core.source.rtltcp
 
 import io.github.radhwanalhajjaj.spectrasdr.core.source.CollectingListener
+import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SampleFormat
 import io.github.radhwanalhajjaj.spectrasdr.core.testutil.Signals
 import org.junit.Assert.assertEquals
@@ -110,6 +111,44 @@ class LatencyRetuneTest {
             assertEquals(RetuneSyncMode.MARKER, c.syncMode)
             assertEquals(0, c.markerTimeouts)
             assertTrue("errors: ${l.errors}", l.errors.isEmpty())
+            c.close()
+        }
+    }
+
+    @Test
+    fun probeRestoresRspGainWhenOnlyTheLnaWasSet() {
+        FakeRtlTcpServer(
+            extraHandshake = RspCapabilities.encode(caps),
+            format = SampleFormat.S16LE,
+            sampleRate = rate,
+            pipelineDelaySamples = 50_000,
+            pacedSamplesPerSecond = rate,
+            stations = listOf(stationA to 0.3),
+        ).start().use { s ->
+            val l = CollectingListener(keepPerEpoch = 10_000)
+            val c = client(s.port)
+            c.setGain(GainSetting.RspLna(3))
+            c.open(l)
+            awaitProbe(c, 1)
+            val epoch = c.setCenterFrequency(100_000_000)
+            l.awaitEpochSamples(epoch = epoch, complex = 10_000)
+            assertEquals(0.0, s.currentGainDb, 0.0)
+            c.close()
+        }
+    }
+
+    @Test
+    fun recalibrateIsANoOpForMarkerClients() {
+        FakeRtlTcpServer().start().use { s ->
+            val l = CollectingListener(keepPerEpoch = 10_000)
+            val c = RtlTcpClient(RtlTcpConfig("127.0.0.1", s.port))
+            c.open(l)
+            l.awaitEpochSamples(epoch = 1, complex = 10_000)
+            c.recalibrate()
+            val epoch = c.setCenterFrequency(101_000_000)
+            l.awaitEpochSamples(epoch = epoch, complex = 10_000)
+            assertEquals(RetuneSyncMode.MARKER, c.syncMode)
+            assertEquals(0, c.probeCount)
             c.close()
         }
     }

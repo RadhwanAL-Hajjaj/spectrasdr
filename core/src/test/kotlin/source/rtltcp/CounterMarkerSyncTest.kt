@@ -76,14 +76,30 @@ class CounterMarkerSyncTest {
 
     @Test
     fun timesOutWhenTestModeIsIgnored() {
-        val sync = CounterMarkerSync(timeoutMs = 100.0)
+        var now = 0L
+        val sync = CounterMarkerSync(timeoutMs = 100.0, nanoTime = { now })
         sync.onRetuneRequested(1, 2, 1_000_000)   // 100 000 samples = 200 000 bytes
+        now = 100_000_000L
         val rnd = Random(5)
         val data = ByteArray(300_000) { rnd.nextInt(256).toByte() }
         assertEquals(200_000, sync.scan(data, 0, data.size))
         assertTrue(sync.timedOut)
         assertEquals(1, sync.timeouts)
         assertEquals(0L, sync.bursts)
+    }
+
+    @Test
+    fun aBacklogAloneDoesNotTimeOut() {
+        var now = 0L
+        val sync = CounterMarkerSync(timeoutMs = 100.0, nanoTime = { now })
+        sync.onRetuneRequested(1, 2, 1_000_000)   // timeoutBytes = 200 000
+        val rnd = Random(5)
+        val data = ByteArray(500_000) { rnd.nextInt(256).toByte() }
+        assertEquals(-1, sync.scan(data, 0, data.size))
+        assertEquals(0, sync.timeouts)
+        now = 100_000_000L
+        assertEquals(1, sync.scan(data, 0, data.size).let { if (it >= 0) 1 else 0 })
+        assertEquals(1, sync.timeouts)
     }
 
     @Test

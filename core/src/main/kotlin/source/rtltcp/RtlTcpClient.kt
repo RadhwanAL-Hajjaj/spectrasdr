@@ -111,6 +111,9 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     private var requestedRate = config.initialSampleRate
 
     @Volatile private var lastGain: GainSetting? = null
+    @Volatile private var lastRspAgc: GainSetting.RspAgc? = null
+    @Volatile private var lastRspIfgr: GainSetting.RspIfgr? = null
+    @Volatile private var lastRspLna: GainSetting.RspLna? = null
     @Volatile private var lastPpm: Int? = null
     private val lastOptions = ConcurrentHashMap<OptionKind, SourceOption>()
 
@@ -151,7 +154,12 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
 
     override fun setGain(gain: GainSetting) {
         synchronized(tuneLock) {
-            lastGain = gain
+            when (gain) {
+                is GainSetting.RspAgc -> lastRspAgc = gain
+                is GainSetting.RspIfgr -> lastRspIfgr = gain
+                is GainSetting.RspLna -> lastRspLna = gain
+                else -> lastGain = gain
+            }
             submit(gainCommands(gain))
         }
     }
@@ -331,8 +339,9 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         return LatencySync(settle)
     }
 
+    /** Re-measures the latency. Marker-synchronised and immediate clients have nothing to re-measure. */
     override fun recalibrate() {
-        probeRequested = true
+        if (sync is LatencySync) probeRequested = true
     }
 
     /** Re-applies every setting as one synchronised retune, so the first blocks are already correct. */
@@ -341,7 +350,10 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         lastOptions[OptionKind.DIRECT_SAMPLING]?.let { cmds += optionCommands(it) }
         lastOptions[OptionKind.OFFSET_TUNING]?.let { cmds += optionCommands(it) }
         lastPpm?.let { cmds += TimedCommand(RtlTcpProtocol.SET_FREQ_CORRECTION, it) }
-        lastGain?.let { cmds += gainCommands(it) }
+        // Nothing is replayed when the user never set a gain, so the server keeps its own default.
+        cmds += if (rspCapabilities == null) lastGain?.let { gainCommands(it) }.orEmpty()
+        else if (lastRspAgc != null || lastRspIfgr != null || lastRspLna != null) rspGainCommands()
+        else emptyList()
         cmds += TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(currentCenterHz))
         val epoch = retune(cmds) {}
         lastOptions.values
@@ -501,9 +513,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
             since += n
         }
         if (measured != null) retuneLatencySamples = measured
-        synchronized(tuneLock) { sync = latencySync(measured ?: retuneLatencySamples) }
+        synchronized(tuneLock) {
+            sync = latencySync(measured ?: retuneLatencySamples)
+            retune(restoreGainCommands() + TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(currentCenterHz))) {}
+        }
         probeCount++
-        retune(restoreGainCommands() + TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(currentCenterHz))) {}
     }
 
     /** Writes [cmds] and waits until they are on the wire. */
@@ -529,9 +543,21 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         ) to listOf(TimedCommand(RtlTcpProtocol.SET_GAIN, lo))
     }
 
-    private fun restoreGainCommands(): List<TimedCommand> = lastGain?.let { gainCommands(it) }
-        ?: if (rspCapabilities != null) listOf(TimedCommand(RtlTcpProtocol.RSP_SET_AGC, 1))
-        else listOf(TimedCommand(RtlTcpProtocol.SET_GAIN_MODE, 0))
+    private fun restoreGainCommands(): List<TimedCommand> =
+        if (rspCapabilities != null) rspGainCommands()
+        else lastGain?.let { gainCommands(it) } ?: listOf(TimedCommand(RtlTcpProtocol.SET_GAIN_MODE, 0))
+
+    /** The three independent RSP gain controls, replayed in a safe order (AGC, IFGR, LNA). */
+    private fun rspGainCommands(): List<TimedCommand> {
+        val agc = lastRspAgc
+        val ifgr = lastRspIfgr
+        val cmds = mutableListOf<TimedCommand>()
+        if (agc != null) cmds += gainCommands(agc)
+        if (ifgr != null && agc?.enabled != true) cmds += gainCommands(ifgr)
+        if (agc == null && ifgr == null) cmds += TimedCommand(RtlTcpProtocol.RSP_SET_AGC, 1)
+        lastRspLna?.let { cmds += gainCommands(it) }
+        return cmds
+    }
 
     companion object {
         val RSP_SAMPLE_RATES = listOf(2_000_000, 3_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000)

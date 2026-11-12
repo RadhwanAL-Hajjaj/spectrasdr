@@ -51,7 +51,10 @@ class FakeRtlTcpServer(
     private val lock = Any()
     private var center = initialCenterHz.toDouble()
     private var testMode = startInTestMode
-    private var gainDb = 0.0
+    @Volatile private var gainDb = 0.0
+
+    /** The effective gain the last gain commands left, in dB. */
+    val currentGainDb: Double get() = gainDb
     private var counter = 0
     private var curI = 0.0
     private var curQ = 0.0
@@ -85,14 +88,31 @@ class FakeRtlTcpServer(
         val input = DataInputStream(socket.getInputStream())
         Thread({
             val cmd = ByteArray(RtlTcpProtocol.COMMAND_SIZE)
+            var lastScheduled = Long.MIN_VALUE
+            var testOnScheduled = 0L
+            var testOnNanos = 0L
             runCatching {
                 while (!closed) {
                     input.readFully(cmd)
                     val code = cmd[0].toInt() and 0xFF
                     val param = RtlTcpProtocol.readIntBE(cmd, 1)
                     commands += code to param
+                    val arrival = System.nanoTime()
                     synchronized(lock) {
-                        pending.addLast(Triple(sampleIndex + pipelineDelaySamples, code, param))
+                        var scheduled = sampleIndex + pipelineDelaySamples
+                        if (code == RtlTcpProtocol.SET_TEST_MODE) {
+                            if (param != 0) {
+                                testOnNanos = arrival
+                            } else {
+                                // The real chip keeps sampling in real time, so a test-mode pulse lasts its
+                                // wall-clock duration even when the reader stalls this generator.
+                                scheduled = maxOf(scheduled, testOnScheduled + ((arrival - testOnNanos) * sampleRate / 1e9).toLong())
+                            }
+                        }
+                        scheduled = maxOf(scheduled, lastScheduled)   // later commands never overtake
+                        lastScheduled = scheduled
+                        if (code == RtlTcpProtocol.SET_TEST_MODE && param != 0) testOnScheduled = scheduled
+                        pending.addLast(Triple(scheduled, code, param))
                         nextApplyAt = pending.first().first
                     }
                 }
