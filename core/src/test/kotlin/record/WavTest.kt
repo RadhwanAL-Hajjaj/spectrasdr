@@ -3,8 +3,12 @@ package io.github.radhwanalhajjaj.spectrasdr.core.record
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Assume
 import org.junit.Test
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 
 class WavTest {
@@ -69,4 +73,58 @@ class WavTest {
         assertEquals(44L + list.size, info.dataOffset)
         assertEquals(100L, info.dataBytes)
     }
+
+    @Test
+    fun fullDiskFailsCleanlyAndCloseNeverThrows() {
+        Assume.assumeTrue(File("/dev/full").exists())
+        val w = WavWriter(File("/dev/full"), 48_000, 1, 16)
+        val chunk = ByteArray(1_024)
+        var failed = false
+        for (i in 0 until 1_000) {
+            try {
+                w.write(chunk)
+            } catch (e: IOException) {
+                failed = true
+                break
+            }
+        }
+        assertTrue("no write failed on /dev/full", failed)
+        w.close()
+        w.close()
+        try {
+            w.write(chunk)
+            fail("write after a failure should throw")
+        } catch (e: IOException) {
+            assertTrue(e.message!!.contains("earlier write"))
+        }
+    }
+
+    private fun malformed(name: String, bytes: ByteArray) {
+        val f = tempFile(name)
+        f.writeBytes(bytes)
+        try {
+            WavReader.read(f)
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message, e.message!!.contains(name))
+        }
+    }
+
+    private fun wavWithFmtSize(size: Long): ByteArray {
+        val b = ByteArray(44)
+        "RIFF".toByteArray().copyInto(b, 0)
+        "WAVE".toByteArray().copyInto(b, 8)
+        "fmt ".toByteArray().copyInto(b, 12)
+        for (i in 0 until 4) b[16 + i] = (size shr (8 * i)).toByte()
+        return b
+    }
+
+    @Test
+    fun rejectsFmtChunkTooSmall() = malformed("small_fmt.wav", wavWithFmtSize(8))
+
+    @Test
+    fun rejectsHugeFmtChunk() = malformed("huge_fmt.wav", wavWithFmtSize(0x7FFFFFF0L))
+
+    @Test
+    fun rejectsTinyFile() = malformed("tiny.wav", ByteArray(10))
 }

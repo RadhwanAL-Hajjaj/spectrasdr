@@ -9,6 +9,9 @@ import java.io.RandomAccessFile
 /**
  * Plays a 2-channel IQ WAV (8-bit unsigned or 16-bit signed) as a source (§5.4), paced in real time
  * unless [realtime] is false. The centre frequency comes from the file name or [centerHzOverride].
+ *
+ * The constructor throws [IllegalArgumentException] for files that cannot be read as IQ WAV (not a WAV,
+ * malformed header, not 2 channels, unsupported bit depth); callers show its message to the user.
  */
 class WavIqFileSource(
     private val file: File,
@@ -21,7 +24,7 @@ class WavIqFileSource(
     private val format = when (wav.bitsPerSample) {
         8 -> SampleFormat.U8
         16 -> SampleFormat.S16LE
-        else -> error("${file.name}: unsupported ${wav.bitsPerSample}-bit samples")
+        else -> throw IllegalArgumentException("${file.name}: unsupported ${wav.bitsPerSample}-bit samples")
     }
 
     init {
@@ -55,12 +58,17 @@ class WavIqFileSource(
     private fun play(listener: SourceListener) {
         try {
             listener.onStarted(info)
+            if (wav.dataBytes < format.bytesPerComplex) {
+                listener.onError(SourceError.ProtocolError("${file.name} contains no IQ samples"))
+                return
+            }
             RandomAccessFile(file, "r").use { raf ->
                 val bytes = ByteArray(blockSize * format.bytesPerComplex)
                 var seq = 0L
                 var emitted = 0L
                 val startNs = System.nanoTime()
                 do {
+                    val before = seq
                     raf.seek(wav.dataOffset)
                     var remaining = wav.dataBytes - wav.dataBytes % format.bytesPerComplex
                     while (running && remaining > 0) {
@@ -80,6 +88,7 @@ class WavIqFileSource(
                         }
                         listener.onBlock(b)
                     }
+                    if (seq == before) break
                 } while (running && loop)
             }
         } catch (e: Exception) {

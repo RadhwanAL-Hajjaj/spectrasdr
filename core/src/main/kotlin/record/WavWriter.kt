@@ -2,6 +2,7 @@
 package io.github.radhwanalhajjaj.spectrasdr.core.record
 
 import java.io.File
+import java.io.IOException
 import java.io.RandomAccessFile
 
 /**
@@ -16,53 +17,117 @@ class WavWriter(
     private val headerIntervalMs: Long = 2_000,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : AutoCloseable {
-    private val raf = RandomAccessFile(file, "rw")
+    private val raf: RandomAccessFile
     private val buffer = ByteArray(64 * 1024)
     private var buffered = 0
+    private var pendingHeader = 0
     private var lastHeader = clock()
+    private var persisted = 0L
+    private var failed = false
+    private var closed = false
 
-    var dataBytes = 0L
-        private set
+    /** Bytes accepted so far; the header only ever counts the ones whose flush succeeded. */
+    val dataBytes: Long get() = persisted + buffered - pendingHeader
 
     init {
         require(bitsPerSample == 8 || bitsPerSample == 16) { "8 or 16 bits per sample" }
-        raf.setLength(0)
-        raf.write(header(0))
+        raf = RandomAccessFile(file, "rw")
+        try {
+            raf.setLength(0)
+        } catch (_: IOException) {
+            // Non-regular files (devices, pipes) cannot be truncated; nothing to discard there.
+        }
+        // The first header travels with the first buffer flush, so a full disk shows up as a write error.
+        val h = header(0)
+        h.copyInto(buffer)
+        buffered = h.size
+        pendingHeader = h.size
     }
 
     fun write(bytes: ByteArray, off: Int = 0, len: Int = bytes.size) {
-        var o = off
-        var l = len
-        while (l > 0) {
-            val n = minOf(l, buffer.size - buffered)
-            System.arraycopy(bytes, o, buffer, buffered, n)
-            buffered += n
-            o += n
-            l -= n
-            if (buffered == buffer.size) flushBuffer()
+        if (failed) throw IOException("An earlier write to the WAV file failed")
+        try {
+            var o = off
+            var l = len
+            while (l > 0) {
+                val n = minOf(l, buffer.size - buffered)
+                System.arraycopy(bytes, o, buffer, buffered, n)
+                buffered += n
+                o += n
+                l -= n
+                if (buffered == buffer.size) flushBuffer()
+            }
+            if (clock() - lastHeader >= headerIntervalMs) updateHeader()
+        } catch (e: IOException) {
+            fail()
+            throw e
         }
-        dataBytes += len
-        if (clock() - lastHeader >= headerIntervalMs) updateHeader()
     }
 
     /** Writes buffered data and rewrites the header so the file is valid up to this point. */
     fun updateHeader() {
-        flushBuffer()
-        val pos = raf.filePointer
-        raf.seek(0)
-        raf.write(header(dataBytes))
-        raf.seek(pos)
-        lastHeader = clock()
+        if (failed) throw IOException("An earlier write to the WAV file failed")
+        try {
+            flushBuffer()
+            writeHeader()
+        } catch (e: IOException) {
+            fail()
+            throw e
+        }
     }
 
+    /** Idempotent. Always releases the file; after a failed write it never throws. */
     override fun close() {
-        updateHeader()
-        raf.close()
+        if (closed) return
+        closed = true
+        try {
+            if (failed) {
+                bestEffortHeader()
+            } else {
+                try {
+                    flushBuffer()
+                    writeHeader()
+                } catch (e: IOException) {
+                    failed = true
+                    bestEffortHeader()
+                    throw e
+                }
+            }
+        } finally {
+            try {
+                raf.close()
+            } catch (_: IOException) {
+                // nothing more can be done
+            }
+        }
+    }
+
+    private fun fail() {
+        failed = true
+        bestEffortHeader()
+    }
+
+    private fun bestEffortHeader() {
+        try {
+            writeHeader()
+        } catch (_: IOException) {
+            // The disk is already failing; the header keeps whatever it last held.
+        }
+    }
+
+    private fun writeHeader() {
+        val pos = raf.filePointer
+        raf.seek(0)
+        raf.write(header(persisted))
+        raf.seek(pos)
+        lastHeader = clock()
     }
 
     private fun flushBuffer() {
         if (buffered > 0) {
             raf.write(buffer, 0, buffered)
+            persisted += buffered - pendingHeader
+            pendingHeader = 0
             buffered = 0
         }
     }

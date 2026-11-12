@@ -66,4 +66,16 @@ class WavIqFileSourceTest {
         val seconds = (System.nanoTime() - start) / 1e9
         assertTrue("took $seconds s", seconds >= 0.45)
     }
+
+    @Test
+    fun emptyRecordingReportsAnErrorInsteadOfSpinning() {
+        val f = Files.createTempDirectory("iq").toFile().resolve("SpectraSDR_20261112_120000Z_145500000Hz_IQ.wav")
+        f.deleteOnExit()
+        WavWriter(f, 96_000, 2, 8).close()
+        val l = CollectingListener()
+        WavIqFileSource(f, realtime = false, loop = true).open(l)
+        assertTrue(l.stopped.await(2, SECONDS))
+        assertEquals(1, l.errors.size)
+        assertTrue(l.errors[0] is SourceError.ProtocolError)
+    }
 }
