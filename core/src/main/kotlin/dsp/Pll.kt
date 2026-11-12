@@ -13,6 +13,8 @@ import kotlin.math.sin
  * The input is mixed to baseband and low-passed by a two-pole arm filter, so the phase error is
  * amplitude-independent and signals more than a few kHz away do not disturb the loop. When locked,
  * input ≈ amplitude · cos(θ), where θ is written to phaseOut for every sample.
+ * [minLockAmplitude] is the smallest tracked amplitude (same scale as [amplitude]) that can count
+ * as lock, so silence and very weak input read as unlocked.
  */
 class Pll(
     private val sampleRate: Double,
@@ -21,6 +23,7 @@ class Pll(
     maxDeviationHz: Double = 20.0,
     armFilterHz: Double = 400.0,
     damping: Double = 0.707,
+    private val minLockAmplitude: Double = 1e-3,
 ) {
     private val twoPi = 2 * PI
     private val armAlpha = 1 - exp(-twoPi * armFilterHz / sampleRate)
@@ -63,7 +66,8 @@ class Pll(
             zIm += armAlpha * (aIm - zIm)
             val err = atan2(zIm, zRe)
             halfAmplitude = hypot(zRe, zIm)
-            lockMetric += lockAlpha * (cos(err) - lockMetric)
+            val quality = if (2 * halfAmplitude < minLockAmplitude) 0.0 else cos(err)
+            lockMetric += lockAlpha * (quality - lockMetric)
             freqOffset = (freqOffset + ki * err).coerceIn(-maxOffset, maxOffset)
             phaseOut[n] = phase.toFloat()
             phase += centerStep + freqOffset + kp * err

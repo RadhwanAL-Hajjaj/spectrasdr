@@ -50,4 +50,13 @@ class PllTest {
         pll.process(x, n, FloatArray(n))
         assertFalse(pll.locked)
     }
+
+    @Test
+    fun doesNotLockOnSilence() {
+        val n = 240_000
+        val pll = Pll(fs, 19_000.0)
+        pll.process(FloatArray(n), n, FloatArray(n))
+        assertFalse(pll.locked)
+        assertTrue("amplitude ${pll.amplitude}", pll.amplitude < 1e-6)
+    }
 }
