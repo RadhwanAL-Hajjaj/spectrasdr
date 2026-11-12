@@ -20,6 +20,7 @@ import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -42,6 +43,7 @@ data class RtlTcpConfig(
     val retuneSync: RetuneSyncMode = RetuneSyncMode.AUTO,
     val blockSize: Int = 16_384,
     val connectTimeoutMs: Int = 5_000,
+    val readTimeoutMs: Int = 5_000,
     val receiveBufferBytes: Int = 8 * 1024 * 1024,
 )
 
@@ -63,6 +65,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
 
     @Volatile private var running = false
     @Volatile private var closed = false
+    @Volatile private var streaming = false
     @Volatile private var socket: Socket? = null
     @Volatile private var output: OutputStream? = null
     @Volatile private var sync: RetuneSync = ImmediateSync()
@@ -95,11 +98,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     override fun close() {
         if (closed) return
         closed = true
-        val wasRunning = running
-        running = false
-        if (wasRunning && config.sendExitOnClose) {
+        if (running && config.sendExitOnClose) {
+            // The reader is still running, so the socket stays open until the exit command is written.
             runCatching { commands.submit { writeCommand(RtlTcpProtocol.ANDROID_EXIT, 0) }.get(1, TimeUnit.SECONDS) }
         }
+        running = false
         commands.shutdownNow()
         runCatching { socket?.close() }
         readerThread?.takeIf { it !== Thread.currentThread() }?.join(2_000)
@@ -119,40 +122,50 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     }
 
     override fun setGain(gain: GainSetting) {
-        lastGain = gain
-        submit(gainCommands(gain))
+        synchronized(tuneLock) {
+            lastGain = gain
+            submit(gainCommands(gain))
+        }
     }
 
     override fun setPpm(ppm: Int) {
-        lastPpm = ppm
-        submit(listOf(TimedCommand(RtlTcpProtocol.SET_FREQ_CORRECTION, ppm)))
+        synchronized(tuneLock) {
+            lastPpm = ppm
+            submit(listOf(TimedCommand(RtlTcpProtocol.SET_FREQ_CORRECTION, ppm)))
+        }
     }
 
     override fun setOption(option: SourceOption) {
-        lastOptions[option.kind] = option
-        val cmds = optionCommands(option)
-        // Direct sampling and offset tuning change what the samples mean, so they count as retunes.
-        if (option is SourceOption.DirectSampling || option is SourceOption.OffsetTuning) retune(cmds) {} else submit(cmds)
+        synchronized(tuneLock) {
+            lastOptions[option.kind] = option
+            val cmds = optionCommands(option)
+            // Direct sampling and offset tuning change what the samples mean, so they count as retunes.
+            if (option is SourceOption.DirectSampling || option is SourceOption.OffsetTuning) retune(cmds) {} else submit(cmds)
+        }
     }
 
     private fun retune(cmds: List<TimedCommand>, update: () -> Unit): Int {
-        val wrapped = sync.wrap(cmds)
-        val epoch = synchronized(tuneLock) {
+        // Wrapping, epoch and queueing share one lock so wire order matches epoch order.
+        return synchronized(tuneLock) {
+            val wrapped = sync.wrap(cmds)
             update()
             requestedEpoch += 1
+            submit(wrapped)
             requestedEpoch
         }
-        submit(wrapped)
-        return epoch
     }
 
     private fun submit(cmds: List<TimedCommand>) {
         if (cmds.isEmpty()) return
         runCatching {
             commands.execute {
-                for (c in cmds) {
-                    if (c.delayBeforeMs > 0) Thread.sleep(c.delayBeforeMs)
-                    writeCommand(c.command, c.param)
+                try {
+                    for (c in cmds) {
+                        if (c.delayBeforeMs > 0) Thread.sleep(c.delayBeforeMs)
+                        writeCommand(c.command, c.param)
+                    }
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
                 }
             }
         }
@@ -206,10 +219,12 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                 s.tcpNoDelay = true
                 s.connect(InetSocketAddress(config.host, config.port), config.connectTimeoutMs)
             } catch (e: IOException) {
-                if (running) listener.onError(SourceError.ConnectFailed("Cannot connect to ${config.host}:${config.port}: ${e.message}"))
+                if (!closed) listener.onError(SourceError.ConnectFailed("Cannot connect to ${config.host}:${config.port}: ${e.message}"))
                 return
             }
             output = s.getOutputStream()
+            s.soTimeout = config.connectTimeoutMs
+            streaming = false
             val input = DataInputStream(s.getInputStream())
             val header = ByteArray(RtlTcpProtocol.HEADER_SIZE)
             input.readFully(header)
@@ -220,14 +235,28 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
             }
             dongle = d
             val leftover = handshake(input, d)
-            sync = chooseSync()
-            applyInitialSettings()
+            val replayEpoch = synchronized(tuneLock) {
+                sync = chooseSync()
+                applyInitialSettings()
+            }
             listener.onStarted(currentInfo)
-            streamLoop(input, leftover, listener)
+            s.soTimeout = config.readTimeoutMs
+            streaming = true
+            streamLoop(input, leftover, listener, replayEpoch)
         } catch (e: EOFException) {
-            if (running) listener.onError(SourceError.StreamEnded("The server closed the connection"))
+            if (!closed) listener.onError(SourceError.StreamEnded("The server closed the connection"))
+        } catch (e: SocketTimeoutException) {
+            if (!closed) {
+                listener.onError(
+                    if (streaming) {
+                        SourceError.StreamEnded("No samples from the server for ${config.readTimeoutMs / 1000.0} s")
+                    } else {
+                        SourceError.ConnectFailed("${config.host}:${config.port} accepted the connection but sent nothing; it may be busy with another client")
+                    },
+                )
+            }
         } catch (e: IOException) {
-            if (running) listener.onError(SourceError.Io(e.message ?: "Connection error"))
+            if (!closed) listener.onError(SourceError.Io(e.message ?: "Connection error"))
         } finally {
             running = false
             runCatching { socket?.close() }
@@ -247,26 +276,28 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     }
 
     /** Re-applies every setting as one synchronised retune, so the first blocks are already correct. */
-    private fun applyInitialSettings() {
+    private fun applyInitialSettings(): Int {
         val cmds = mutableListOf(TimedCommand(RtlTcpProtocol.SET_SAMPLE_RATE, sampleRate))
         lastOptions[OptionKind.DIRECT_SAMPLING]?.let { cmds += optionCommands(it) }
         lastOptions[OptionKind.OFFSET_TUNING]?.let { cmds += optionCommands(it) }
         lastPpm?.let { cmds += TimedCommand(RtlTcpProtocol.SET_FREQ_CORRECTION, it) }
         lastGain?.let { cmds += gainCommands(it) }
         cmds += TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(currentCenterHz))
-        retune(cmds) {}
+        val epoch = retune(cmds) {}
         lastOptions.values
             .filter { it.kind != OptionKind.DIRECT_SAMPLING && it.kind != OptionKind.OFFSET_TUNING }
             .forEach { submit(optionCommands(it)) }
+        return epoch
     }
 
-    private fun streamLoop(input: DataInputStream, leftover: ByteArray, listener: SourceListener) {
+    private fun streamLoop(input: DataInputStream, leftover: ByteArray, listener: SourceListener, replayEpoch: Int) {
         val buf = ByteArray(64 * 1024)
         System.arraycopy(leftover, 0, buf, 0, leftover.size)
         var have = leftover.size
         val bps = format.bytesPerComplex
-        var observedEpoch = 0
-        var activeEpoch = 0
+        // Retunes before the replay never carried markers; start just below the replay's epoch.
+        var observedEpoch = replayEpoch - 1
+        var activeEpoch = replayEpoch - 1
         var activeCenterHz = currentCenterHz
         var activeRate = sampleRate
         var pendingCenterHz = activeCenterHz

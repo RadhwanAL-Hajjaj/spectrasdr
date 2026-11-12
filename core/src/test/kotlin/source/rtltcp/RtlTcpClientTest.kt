@@ -135,4 +135,18 @@ class RtlTcpClientTest {
             c.close()
         }
     }
+
+    @Test
+    fun reportsAServerThatAcceptsButSendsNothing() {
+        ServerSocket(0).use { silent ->
+            val accepted = Thread { runCatching { silent.accept() } }.apply { isDaemon = true; start() }
+            val l = CollectingListener()
+            val c = client(silent.localPort) { it.copy(connectTimeoutMs = 500) }
+            c.open(l)
+            assertTrue(l.stopped.await(5, SECONDS))
+            assertTrue(l.errors.single() is SourceError.ConnectFailed)
+            c.close()
+            accepted.join(1_000)
+        }
+    }
 }
