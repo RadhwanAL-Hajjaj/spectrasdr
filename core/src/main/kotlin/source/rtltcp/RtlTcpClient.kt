@@ -68,6 +68,13 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     var rspCapabilities: RspCapabilities? = null
         private set
 
+    /** The retune strategy in use (§7.1). */
+    val syncMode: RetuneSyncMode
+        get() = when (sync) {
+            is CounterMarkerSync -> RetuneSyncMode.MARKER
+            else -> RetuneSyncMode.IMMEDIATE
+        }
+
     @Volatile private var running = false
     @Volatile private var closed = false
     @Volatile private var streaming = false
@@ -293,7 +300,10 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     }
 
     private fun chooseSync(): RetuneSync = when (config.retuneSync) {
-        RetuneSyncMode.AUTO, RetuneSyncMode.IMMEDIATE -> ImmediateSync()
+        RetuneSyncMode.IMMEDIATE -> ImmediateSync()
+        RetuneSyncMode.MARKER -> CounterMarkerSync()
+        RetuneSyncMode.AUTO ->
+            if (rspCapabilities == null && supports(RtlTcpProtocol.SET_TEST_MODE)) CounterMarkerSync() else ImmediateSync()
     }
 
     /** Re-applies every setting as one synchronised retune, so the first blocks are already correct. */
