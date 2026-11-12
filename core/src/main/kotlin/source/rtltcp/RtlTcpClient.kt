@@ -63,6 +63,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     var dongle: RtlTcpProtocol.DongleInfo? = null
         private set
 
+    /** The rsp_tcp extended-mode capabilities, when the server sent them. */
+    @Volatile
+    var rspCapabilities: RspCapabilities? = null
+        private set
+
     @Volatile private var running = false
     @Volatile private var closed = false
     @Volatile private var streaming = false
@@ -203,7 +208,12 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     }
 
     private fun optionCommands(option: SourceOption): List<TimedCommand> = when (option) {
-        is SourceOption.BiasT -> listOf(TimedCommand(RtlTcpProtocol.SET_BIAS_TEE, if (option.enabled) 1 else 0))
+        is SourceOption.BiasT -> listOf(
+            TimedCommand(
+                if (rspCapabilities != null) RtlTcpProtocol.RSP_SET_BIAS_T else RtlTcpProtocol.SET_BIAS_TEE,
+                if (option.enabled) 1 else 0,
+            ),
+        )
         is SourceOption.DirectSampling -> listOf(TimedCommand(RtlTcpProtocol.SET_DIRECT_SAMPLING, option.mode))
         is SourceOption.OffsetTuning -> listOf(TimedCommand(RtlTcpProtocol.SET_OFFSET_TUNING, if (option.enabled) 1 else 0))
         is SourceOption.RspAntenna -> listOf(TimedCommand(RtlTcpProtocol.RSP_SET_ANTENNA, option.port))
@@ -268,6 +278,17 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     private fun handshake(input: DataInputStream, d: RtlTcpProtocol.DongleInfo): ByteArray {
         format = SampleFormat.U8
         currentInfo = rtlInfo(d.tunerType.gainsTenthsDb)
+        if (!config.detectExtended) return ByteArray(0)
+        val first = ByteArray(4)
+        input.readFully(first)
+        if (String(first, Charsets.US_ASCII) != RspCapabilities.MAGIC) return first
+        val struct = ByteArray(RspCapabilities.SIZE)
+        first.copyInto(struct)
+        input.readFully(struct, 4, RspCapabilities.SIZE - 4)
+        val caps = RspCapabilities.parse(struct)
+        rspCapabilities = caps
+        format = if (caps.sampleFormat == RspCapabilities.FORMAT_S16) SampleFormat.S16LE else SampleFormat.U8
+        currentInfo = rspInfo(caps)
         return ByteArray(0)
     }
 
@@ -376,7 +397,23 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         },
     )
 
+    private fun rspInfo(c: RspCapabilities) = SourceInfo(
+        name = "${c.model.displayName} (rsp_tcp ${config.host})",
+        kind = SourceKind.RSP_TCP,
+        sampleFormat = format,
+        canTune = true,
+        sampleRates = RSP_SAMPLE_RATES,
+        gainModel = GainModel.Rsp(c.model.maxLnaStates, c.ifgrMin, c.ifgrMax, c.hasAgc),
+        options = buildSet {
+            if (c.hasBiasT) add(OptionKind.BIAS_T)
+            if (c.antennaInputCount > 1) add(OptionKind.RSP_ANTENNA)
+            if (c.hasNotches) add(OptionKind.RSP_NOTCHES)
+        },
+    )
+
     companion object {
+        val RSP_SAMPLE_RATES = listOf(2_000_000, 3_000_000, 4_000_000, 6_000_000, 8_000_000, 10_000_000)
+
         val RTL_SAMPLE_RATES = listOf(
             250_000, 1_024_000, 1_536_000, 1_792_000, 1_920_000, 2_048_000,
             2_160_000, 2_400_000, 2_560_000, 2_880_000, 3_200_000,
