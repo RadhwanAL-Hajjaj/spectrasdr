@@ -46,7 +46,7 @@ Primary test device: Samsung Galaxy S24 Ultra (arm64, Android 14+) with an RTL-S
 
 | Package | Contents |
 |---------|----------|
-| `source` | `IqSource` interface, sample converters, pooled `IqBlock`, `RtlTcpClient` (rtl_tcp + rsp_tcp extended), `WavIqFileSource` |
+| `source` | `IqSource` interface, sample converters, pooled `IqBlock`, `RtlTcpClient` (rtl_tcp + rsp_tcp extended), `WavIqFileSource`, `SimulatorSource` (synthetic stations), `RetuneSync` (stream markers and latency probe, §7.1) |
 | `dsp` | `Fft`, windows, `Nco`, `FirDesign` (Kaiser windowed-sinc), `FirDecimator` (polyphase, complex), `DecimatorChain`, `FractionalResampler` with drift control, `DcBlocker`, `Agc`, `Deemphasis`, `Pll` |
 | `demod` | `Demodulator` interface; `WfmDemod`, `StereoDecoder`, `NfmDemod`, `AmDemod`, `SsbDemod` (USB/LSB), `CwDemod`; `Squelch` |
 | `rds` | `RdsDemodulator` (57 kHz subcarrier → bits), `RdsDecoder` (block sync, groups → `RdsState`) |
@@ -96,6 +96,15 @@ interface AudioSink {
 
 `AudioSink.write` must return within a few milliseconds. `AndroidAudioSink` uses an AudioTrack (PCM float, about 150 ms buffer, non-blocking writes) behind a small ring buffer.
 
+### 4.4 Performance rules
+
+Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectrum at 2.4 MS/s) is about 0.2 GFLOP/s, a fraction of one performance core. The practical threats are pauses and scheduling, so:
+
+- **Zero allocation in the signal path:** preallocated `FloatArray`s and pooled blocks; no boxing, lambdas or collections inside per-sample loops; u8 → float through a 256-entry lookup table; NCO by phasor recursion with periodic renormalisation.
+- **Cheap decimation first:** polyphase FIRs compute only output samples; symmetric taps are folded; the spectrum FFT runs at the display frame rate, not on every sample.
+- **Scheduling:** source, DSP and audio threads run at audio priority; the DSP thread reports its work duration through Android's `PerformanceHintManager` (API 31+) so the system keeps it on cores fast enough to meet the deadline; spectrum and demodulation can run on separate threads.
+- **Measured, not assumed:** an in-app benchmark (Settings → Diagnostics) runs every mode on synthetic IQ and records MS/s per stage; the result caps the selectable sample rate per device (≥ 1.5× real-time headroom required). Any single block that fails the budget can be replaced by a native version behind the same interface without touching the rest.
+
 ## 5. Protocols
 
 ### 5.1 SDR driver app hand-off (USB)
@@ -118,6 +127,7 @@ interface AudioSink {
   - `0x01` frequency (Hz), `0x02` sample rate, `0x03` gain mode (0 auto, 1 manual), `0x04` gain (tenths of dB), `0x05` PPM, `0x06` IF gain, `0x07` test mode, `0x08` RTL AGC, `0x09` direct sampling (0 off, 1 I, 2 Q), `0x0a` offset tuning, `0x0b` RTL xtal, `0x0c` tuner xtal, `0x0d` gain by index, `0x0e` bias-T.
   - Android driver extras: `0x7e` exit, `0x7f` gain by percentage, `0x80` 16-bit signed samples.
 - When `supportedTcpCommands` is present, only listed commands are sent, and the UI hides controls the source does not support (for example, the SDR driver app does not list bias-T `0x0e`).
+- **Test mode `0x07` as a stream marker:** with test mode on, the RTL2832U outputs an incrementing byte counter (each byte = previous + 1 mod 256, as used by `rtl_test`) instead of samples. The SDR driver app lists `0x07` in `supportedTcpCommands`. §7.1 uses this to mark retune boundaries exactly.
 
 ### 5.3 rsp_tcp extended mode (SDRplay)
 
@@ -141,6 +151,8 @@ interface AudioSink {
 - **s16 samples:** little-endian, interleaved I/Q, scaled by 1/32768.
 - **Extended commands:** `0x1f` antenna (0 A, 1 B, 2 Hi-Z), `0x20` LNA state, `0x21` IF gain reduction (dB), `0x22` AGC (0/1), `0x23` AGC set point (dBFS, signed), `0x24` notch bitmask (AM 1, broadcast 2, DAB 4, RF 8), `0x25` bias-T, `0x26` reference out.
 - The UI shows the network load: s16 at N MS/s needs about 32·N Mbit/s (2 MS/s ≈ 64 Mbit/s).
+- rsp_tcp accepts but ignores test mode `0x07`, so SDRplay retunes use the latency probe in §7.1.
+- **Link handling:** socket receive buffer 8 MB; a 2-second throughput test at connect picks the highest sample rate with ≥ 30 % headroom; sustained drops (> 2 % of blocks over 10 s) step the rate down one level with a notice. Setup guidance: Raspberry Pi on Ethernet, phone on 5 GHz Wi-Fi.
 
 ### 5.4 IQ WAV files
 
@@ -178,6 +190,7 @@ interface AudioSink {
 - **RDS:** mix MPX down by 57 kHz (3θ from the pilot PLL when locked, otherwise a free-running Costas loop) → 2.4 kHz LPF → decimate → Costas loop for residual phase → symbol timing recovery at 2,375 baud → biphase decode to 1,187.5 bit/s → differential decode → block sync.
   - Block check: generator g(x) = x¹⁰ + x⁸ + x⁷ + x⁵ + x⁴ + x³ + 1; offset words A `0x0FC`, B `0x198`, C `0x168`, C′ `0x350`, D `0x1B4`. Syndromes are derived from the offset words at start-up.
   - Groups decoded: PI, PTY, TP/TA, 0A/0B (programme service name), 2A/2B (radio text, A/B flag handling), 4A (clock time).
+  - Weak-signal handling: when the pilot is locked, the 57 kHz reference is derived from it (the standard locks the RDS subcarrier to the pilot's third harmonic), so no free-running carrier acquisition is needed; burst error correction up to 5 bits per block (the (26,16) code's correction capability), applied only while block sync is established; a PS/RT character is displayed only after two identical receptions or one error-free block; text resets on PI change.
 - **NFM:** discriminator scaled so ±5 kHz = ±1.0 (±2.5 kHz option), 300 Hz high-pass (removes CTCSS), 3.5 kHz LPF, de-emphasis on by default.
 - **AM:** envelope detector, DC block, AGC.
 - **SSB:** shift the passband centre to 0 Hz (USB +1,550 Hz, LSB −1,550 Hz), complex LPF ±1,250 Hz, shift back, take the real part, AGC (attack 2 ms, decay 500 ms, hang 200 ms).
@@ -193,12 +206,21 @@ interface AudioSink {
 
 - **Inputs:** start and stop frequency, resolution bandwidth (FFT size = next power of two ≥ fs / RBW), usable fraction u (RTL 0.75, SDRplay 0.85), dwell = K FFTs averaged per hop (default 8), settle time (default 120 ms for the USB driver app, 250 ms for network sources; user-adjustable).
 - **DC handling:** *accurate* (default for RTL) steps hops by u·fs/2 (50 % overlap) so each hop's DC zone is filled by a neighbour; *fast* steps by u·fs and interpolates ±2 bins around DC.
-- **Retune protocol:** send the new centre frequency, note the `seq` of the newest block received, discard every block up to that `seq` plus the settle time, then capture K·N samples.
+- **Retune protocol:** see §7.1; then capture K·N samples.
 - **Stitching:** keep each hop's usable window (minus its DC zone in accurate mode) and merge into a global frequency grid, averaging where hops overlap.
 - **Baseline flattening** (option, on by default): estimate the hop passband shape as the median across hops for each relative bin, then subtract it in dB.
 - **Traces and tools:** live, average-over-sweeps and max-hold traces; threshold line; peak list (local maxima above threshold, minimum spacing, top 50); markers; estimated duration shown before start.
 - **Storage:** save sweeps (metadata + float32 levels) to overlay later. CSV export starts with a `#` comment line holding start, stop, RBW and time, followed by `frequency_mhz,level_db` rows (frequency to 6 decimals, level to 1 decimal).
 - A sweep pauses the receiver (single tuner) and restores its state afterwards.
+
+### 7.1 Retune synchronisation (`RetuneSync`)
+
+Samples already inside the driver's USB buffers and the socket still belong to the old frequency when a retune command is sent. Using them puts signals at the wrong frequency (sweep "ghosts") and stops the scanner on the wrong channel. Every hardware retune therefore goes through `RetuneSync`:
+
+1. **Own queue:** blocks are tagged with `seq`; every block received before the retune is discarded.
+2. **RTL sources (exact):** send frequency, then test mode on, then (5 ms later) test mode off. Commands execute in order, so the counter burst in the stream begins only after the retune has completed. Samples are discarded until the burst ends (detected as ≥ 64 consecutive incrementing bytes, then the first byte breaking the pattern), plus a 1 ms guard. A timeout of 1 s falls back to the measured latency.
+3. **Sources without test mode (rsp_tcp, legacy SDRplay driver):** at connect, a latency probe steps IF gain reduction by 20 dB and times the jump in noise power; settle = measured latency + 50 % margin, re-probed every 5 minutes and after reconnects.
+4. **NCO-only moves:** scanner channels inside the current tuner window change in DSP and need no synchronisation.
 
 ## 8. Scanner
 
@@ -228,7 +250,9 @@ interface AudioSink {
   - squelch (with auto), volume, gain controls per source type, S-meter (dBFS)
   - RDS strip (PS, RT, PI, PTY, stereo indicator), record audio/IQ, bookmark
 - **WaterfallView:** GLSurfaceView with OpenGL ES 3.0. An R8 ring texture (width ≤ 2,048 bins × 1,024 rows) receives one row per frame through `glTexSubImage2D`; dB values are normalised to 0–255 with the current range when written, and a fragment shader maps them through a palette lookup texture and applies the scroll offset. Range changes affect new rows. The spectrum trace is drawn in a Compose Canvas overlay.
-- **RadioService:** foreground service (`mediaPlayback`) that owns the `Receiver`; notification with play/stop, frequency, mode and RDS name; partial wake lock while running; high-performance Wi-Fi lock for network sources; audio focus handling (pause for calls).
+- **RadioService:** foreground service (`mediaPlayback`) that owns the `Receiver`; notification with play/stop, frequency, mode and RDS name; partial wake lock while running; Wi-Fi lock for network sources (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+, high-performance mode below); audio focus handling (pause for calls).
+- **Background survival:** on first background use, if the app is battery-optimised, a one-time prompt explains why and opens the system battery settings so the user can set the app to Unrestricted (Samsung's sleeping-apps lists can otherwise stop long listening sessions).
+- **Diagnostics:** Settings → Diagnostics shows the benchmark (§4.4), overrun and drop counters, the measured retune latency and recent errors, with a "Share report" button.
 - **Persistence:** Room for channels, lists, servers, saved sweeps and the activity log; DataStore for settings and last state.
 - **Permissions:** INTERNET, ACCESS_NETWORK_STATE, ACCESS_WIFI_STATE, WAKE_LOCK, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS (runtime on Android 13+). No location or storage permissions.
 - **Look:** dark-first Material 3; portrait and landscape layouts; works on tablets.
@@ -241,6 +265,7 @@ interface AudioSink {
 | Driver refuses (no USB permission, unsupported device) | Show the driver's `detailed_exception_message` |
 | Dongle unplugged / stream ends | Stop cleanly, show the reason, restart on `SDR_DEVICE_ATTACHED` or on user retry |
 | Network source lost | Reconnect with back-off 1, 2, 4, 8, 15 s (up to 2 min), restoring frequency, rate and gain |
+| Network too slow for the rate | Step the sample rate down one level after sustained drops, with a notice (§5.3) |
 | Protocol error (bad header, short struct) | Close, show a readable message, log details |
 | DSP overload | Drop oldest blocks; overload badge when > 1 % of blocks dropped over 10 s, with a suggestion to lower the rate or FFT size |
 | Audio underrun | Drift-compensating resampler plus silence fill |
@@ -259,16 +284,23 @@ All errors reach the user as plain-language messages, with technical detail in l
 | NCO, resampler | Frequency accuracy; drift controller converges and holds fill level |
 | WFM mono | 1 kHz tone at 75 kHz deviation → SINAD ≥ 40 dB |
 | Stereo | Left-only tone → right channel ≤ −25 dB |
-| RDS | Synthetic MPX carrying 0A (PS) and 2A (RT) groups, FM-modulated end to end → PI, PS and RT decoded exactly |
+| RDS | Synthetic MPX carrying 0A (PS) and 2A (RT) groups, FM-modulated end to end → PI, PS and RT decoded exactly; with added noise, a block-error-rate curve stays under its pass line, and burst errors ≤ 5 bits are corrected |
 | NFM / AM | Tone recovered with SINAD ≥ 30 dB |
 | SSB / CW | Opposite sideband rejected ≥ 40 dB; CW tone at the pitch |
 | Squelch, scanner | Hysteresis; scripted channel powers exercise stop, resume, hang, lockout and window grouping |
 | Sweep | Synthetic tones across hops found within ±1 bin and ±1 dB; DC zone filled in accurate mode |
+| Retune sync | Fake server with an artificial 300 ms pipeline delay: test-mode markers and the latency probe both give sweeps with zero ghost signals; marker detection never fires on random or real IQ |
 | rtl_tcp / rsp_tcp | Fake server checks header parsing, the RSP0 struct (including the little-endian field), u8 and s16 samples, and command bytes; `supportedTcpCommands` filtering |
 | Recording | WAV round trip; header valid after a simulated crash; file-name parsing |
 | Throughput | WFM stereo + RDS chain at 2.4 MS/s runs ≥ 3× real time on the JVM |
 
 **CI (GitHub Actions):** `./gradlew :core:test :app:assembleDebug :app:lintDebug` on every push, debug APK uploaded as an artifact; tags `v*` build a release APK.
+
+**Emulator tests (GitHub Actions, Android emulator with KVM):** instrumented tests start the app against an in-test fake rtl_tcp server and the `SimulatorSource`, then check that the receiver tunes, plays audio, shows the RDS name, runs a sweep and completes a scan; screenshots of each screen are saved as build artifacts. Whether Claude can read build logs and artifacts directly is confirmed when the repository is attached; otherwise the user forwards them.
+
+**Simulator source:** `SimulatorSource` reuses the test signal generators to produce a band with FM stations (stereo + RDS), NFM bursts, AM, SSB and CW signals, so the whole app runs in the emulator and on any phone without hardware.
+
+**Field regression clips:** short IQ recordings of real stations (strong and weak) can be added as decoder regression tests; broadcast clips are kept out of the public repository.
 
 **Device checklist (manual):** S24 Ultra + V4 through the driver app — open/close, FM stereo + RDS, NFM, AM airband, SSB on HF (V4 upconverter), sweeps of 88–108 MHz and 470–694 MHz, scanner, recording and playback, screen-off listening, unplug/replug; SDRplay through rsp_tcp in standard and extended mode.
 
@@ -281,8 +313,8 @@ All errors reach the user as plain-language messages, with technical detail in l
 
 Each milestone ends in a working, tested state.
 
-1. **Core engine** — sources (rtl_tcp/rsp_tcp client, IQ files), DSP blocks, all demodulators, stereo, RDS, spectrum analyzer, `Receiver`; full unit tests and throughput test pass in the workspace.
-2. **Android receiver** — Gradle project and CI, driver hand-off, network sources, `RadioService`, audio sink, receiver screen with spectrum and GL waterfall. First installable APK.
+1. **Core engine** — sources (rtl_tcp/rsp_tcp client, IQ files, simulator), `RetuneSync`, DSP blocks, all demodulators, stereo, RDS, spectrum analyzer, `Receiver`; full unit tests and throughput test pass in the workspace.
+2. **Android receiver** — Gradle project, CI and emulator tests, driver hand-off, network sources, `RadioService`, audio sink, receiver screen with spectrum and GL waterfall, diagnostics and benchmark. First installable APK.
 3. **Sweep analyzer** — engine, screen, saved sweeps, CSV export.
 4. **Scanner and recording** — channel lists, memory scan and range search, activity log, audio/IQ recording, recordings browser, IQ playback.
 5. **Polish** — settings, error states, landscape/tablet layouts, README and release build.
@@ -295,10 +327,12 @@ Each milestone ends in a working, tested state.
 
 ## 16. Risks
 
-| Risk | Mitigation |
-|------|------------|
-| Kotlin DSP too slow at high sample rates | Multistage decimation, preallocated arrays, throughput test gate, rate caps; native DSP in phase 2 |
-| Driver/network buffering leaves stale samples after a retune | Block `seq` tagging plus a configurable settle time |
-| Android code cannot run in the development workspace | CI builds, a thin Android layer, the device checklist |
-| rsp_tcp throughput over Wi-Fi | Default 2 MS/s s16; required bandwidth shown; u8 fallback |
-| RDS robustness on weak signals | Costas loop, timing recovery and block-level error checks, tested with added noise |
+| Risk | Solution | Proof it is solved |
+|------|----------|--------------------|
+| Kotlin DSP too slow | Load is about 0.2 GFLOP/s at 2.4 MS/s; the real threats (GC pauses, slow-core scheduling) are removed by the §4.4 rules: zero allocation, audio-priority threads, `PerformanceHintManager`, split threads | JVM throughput test ≥ 3× real time; in-app benchmark caps each device's sample rate; any failing block gets a native replacement behind its interface |
+| Stale samples after a retune | §7.1 `RetuneSync`: exact test-mode markers on RTL sources, measured latency probe on SDRplay, no hardware retune for in-window scanner moves | Fake-server test with a 300 ms pipeline delay yields zero ghost signals |
+| Android code cannot run in the workspace | Thin Android layer; CI build + lint; emulator tests with the simulator and a fake rtl_tcp server, with screenshots; diagnostics report from the phone | Green CI and emulator runs on every push; device checklist for USB and RF |
+| rsp_tcp throughput over Wi-Fi | §5.3 link handling: 8 MB socket buffer, low-latency Wi-Fi lock, link test picks the rate, automatic step-down; Pi on Ethernet; OpenRSP direct USB in phase 2 | Drop counter stays < 1 % at the auto-selected rate during a 10-minute session |
+| RDS on weak signals | §6.4: pilot-locked 57 kHz reference, 5-bit burst correction, confirmed characters | Block-error-rate curve test with noise; field regression clips |
+| Battery management stops background listening | `mediaPlayback` foreground service, wake and Wi-Fi locks, one-time Unrestricted battery prompt (§10) | 1-hour screen-off listening session on the S24 Ultra without interruption |
+| Dependence on the SDR driver app | It is GPL open source and widely used; the source abstraction allows forking it or embedding librtlsdr (phase 2) without UI changes | `IqSource` contract tests run against every source type |
