@@ -87,6 +87,7 @@ interface SourceListener {
 /**
  * A stream of IQ samples produced on the source's own thread. [setCenterFrequency] returns a tune
  * epoch E: blocks with tuneEpoch ≥ E are at the requested frequency or a later one (§7.1).
+ * A source whose `info.canTune` is false ignores the request and returns its current epoch.
  */
 interface IqSource {
     val info: SourceInfo

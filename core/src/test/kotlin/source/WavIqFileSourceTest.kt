@@ -24,6 +24,13 @@ class WavIqFileSourceTest {
     }
 
     @Test
+    fun dueNanosDoesNotOverflow() {
+        assertEquals(7_200_000_000_000L, WavIqFileSource.dueNanos(2_400_000L * 7_200, 2_400_000))
+        assertEquals(500_000_000L, WavIqFileSource.dueNanos(1_200_000, 2_400_000))
+        assertEquals(2_592_000_000_000_000L, WavIqFileSource.dueNanos(10_000_000L * 86_400 * 30, 10_000_000))
+    }
+
+    @Test
     fun playsEverySampleAndStops() {
         val src = WavIqFileSource(iqFile(10_000), realtime = false)
         assertEquals(145_500_000L, src.centerFrequencyHz)

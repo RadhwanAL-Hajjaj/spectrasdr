@@ -36,7 +36,9 @@ object WavReader {
                     if (raf.filePointer + size > length) bad("truncated fmt chunk")
                     val f = ByteArray(size.toInt())
                     raf.readFully(f)
-                    format = intArrayOf(u16(f, 0), u16(f, 2), u32(f, 4).toInt(), u16(f, 14))
+                    val rate = u32(f, 4).toInt()
+                    if (rate <= 0) bad("invalid sample rate $rate")
+                    format = intArrayOf(u16(f, 0), u16(f, 2), rate, u16(f, 14))
                     if (size % 2 == 1L && raf.filePointer < length) raf.skipBytes(1)
                 }
                 "data" -> {

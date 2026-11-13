@@ -25,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** Settings for [RtlTcpClient]. */
 data class RtlTcpConfig(
@@ -45,7 +46,18 @@ data class RtlTcpConfig(
     val connectTimeoutMs: Int = 5_000,
     val readTimeoutMs: Int = 5_000,
     val receiveBufferBytes: Int = 8 * 1024 * 1024,
-)
+) {
+    init {
+        require(host.isNotBlank()) { "host must not be blank" }
+        require(port in 1..65535) { "port $port is outside 1..65535" }
+        require(initialFrequencyHz in 0..0xFFFF_FFFFL) { "initialFrequencyHz $initialFrequencyHz is outside 0..4294967295" }
+        require(initialSampleRate > 0) { "initialSampleRate $initialSampleRate must be positive" }
+        require(blockSize > 0) { "blockSize $blockSize must be positive" }
+        require(connectTimeoutMs > 0) { "connectTimeoutMs $connectTimeoutMs must be positive" }
+        require(readTimeoutMs > 0) { "readTimeoutMs $readTimeoutMs must be positive" }
+        require(receiveBufferBytes > 0) { "receiveBufferBytes $receiveBufferBytes must be positive" }
+    }
+}
 
 /**
  * IQ source for rtl_tcp servers, the Android SDR driver's local server and rsp_tcp (§5). A reader
@@ -117,8 +129,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     @Volatile private var lastPpm: Int? = null
     private val lastOptions = ConcurrentHashMap<OptionKind, SourceOption>()
 
+    private val opened = AtomicBoolean(false)
+
+    /** One client is one connection: open() works once; to reconnect, create a new client. */
     override fun open(listener: SourceListener) {
-        check(!running && !closed) { "an RtlTcpClient can be opened once" }
+        check(!closed && opened.compareAndSet(false, true)) { "an RtlTcpClient can be opened once" }
         running = true
         readerThread = Thread({ readerLoop(listener) }, "rtltcp-reader").apply {
             isDaemon = true
@@ -139,11 +154,14 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         readerThread?.takeIf { it !== Thread.currentThread() }?.join(2_000)
     }
 
-    override fun setCenterFrequency(hz: Long): Int =
-        retune(listOf(TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(hz)))) {
+    /** @throws IllegalArgumentException if [hz] is outside 0..4294967295 (the range of rtl_tcp's 32-bit field). */
+    override fun setCenterFrequency(hz: Long): Int {
+        require(hz in 0..0xFFFF_FFFFL) { "Frequency $hz Hz is outside the 0..4294967295 Hz range of rtl_tcp" }
+        return retune(listOf(TimedCommand(RtlTcpProtocol.SET_FREQ, freqParam(hz)))) {
             requestedCenterHz = hz
             currentCenterHz = hz
         }
+    }
 
     override fun setSampleRate(sps: Int) {
         retune(listOf(TimedCommand(RtlTcpProtocol.SET_SAMPLE_RATE, sps))) {

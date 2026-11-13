@@ -110,6 +110,22 @@ class WavTest {
         }
     }
 
+    @Test
+    fun rejectsZeroSampleRate() {
+        val f = tempFile()
+        WavWriter(f, 8_000, 2, 8).use { it.write(ByteArray(100)) }
+        val bytes = f.readBytes()
+        for (i in 24 until 28) bytes[i] = 0
+        malformed("zero_rate.wav", bytes)
+        f.writeBytes(bytes)
+        try {
+            WavReader.read(f)
+            fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message, e.message!!.contains("sample rate"))
+        }
+    }
+
     private fun wavWithFmtSize(size: Long): ByteArray {
         val b = ByteArray(44)
         "RIFF".toByteArray().copyInto(b, 0)

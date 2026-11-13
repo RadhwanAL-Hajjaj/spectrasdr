@@ -101,6 +101,61 @@ class RtlTcpClientTest {
     }
 
     @Test
+    fun rejectsFrequenciesOutsideTheRtlTcpRange() {
+        val c = client(1234)
+        for (hz in longArrayOf(-1L, 1L shl 32)) {
+            try {
+                c.setCenterFrequency(hz)
+                org.junit.Assert.fail("expected IllegalArgumentException for $hz")
+            } catch (e: IllegalArgumentException) {
+                assertTrue(e.message, e.message!!.contains("$hz"))
+            }
+        }
+        c.setCenterFrequency(0xFFFF_FFFFL)
+    }
+
+    @Test
+    fun validatesConfigAtConstruction() {
+        RtlTcpConfig("127.0.0.1", 1234)
+        val bad = listOf<() -> RtlTcpConfig>(
+            { RtlTcpConfig("127.0.0.1", 0) },
+            { RtlTcpConfig("127.0.0.1", 70_000) },
+            { RtlTcpConfig("127.0.0.1", 1234, blockSize = 0) },
+            { RtlTcpConfig("127.0.0.1", 1234, connectTimeoutMs = 0) },
+            { RtlTcpConfig("127.0.0.1", 1234, readTimeoutMs = 0) },
+            { RtlTcpConfig("127.0.0.1", 1234, receiveBufferBytes = 0) },
+            { RtlTcpConfig("127.0.0.1", 1234, initialSampleRate = 0) },
+            { RtlTcpConfig("127.0.0.1", 1234, initialFrequencyHz = -1) },
+            { RtlTcpConfig(" ", 1234) },
+        )
+        for ((i, make) in bad.withIndex()) {
+            try {
+                make()
+                org.junit.Assert.fail("config #$i should be rejected")
+            } catch (e: IllegalArgumentException) {
+                // expected
+            }
+        }
+    }
+
+    @Test
+    fun cannotBeOpenedTwiceEvenAfterTheStreamEnded() {
+        FakeRtlTcpServer(totalSamples = 50_000).start().use { server ->
+            val l = CollectingListener()
+            val c = client(server.port)
+            c.open(l)
+            assertTrue(l.stopped.await(10, SECONDS))
+            try {
+                c.open(CollectingListener())
+                org.junit.Assert.fail("second open() should throw")
+            } catch (e: IllegalStateException) {
+                // expected
+            }
+            c.close()
+        }
+    }
+
+    @Test
     fun reportsConnectionFailure() {
         val freePort = ServerSocket(0).use { it.localPort }
         val l = CollectingListener()

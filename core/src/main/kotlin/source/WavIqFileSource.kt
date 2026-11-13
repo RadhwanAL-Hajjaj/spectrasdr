@@ -83,7 +83,7 @@ class WavIqFileSource(
                         b.tuneEpoch = 0
                         if (realtime) {
                             emitted += b.length
-                            val wait = startNs + emitted * 1_000_000_000L / wav.sampleRate - System.nanoTime()
+                            val wait = startNs + dueNanos(emitted, wav.sampleRate) - System.nanoTime()
                             if (wait > 0) Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt())
                         }
                         listener.onBlock(b)
@@ -104,6 +104,10 @@ class WavIqFileSource(
         thread?.takeIf { it !== Thread.currentThread() }?.join(2_000)
     }
 
+    /**
+     * Ignored: the file plays at its recorded frequency ([info] has `canTune` false), and the tune
+     * epoch is always 0.
+     */
     override fun setCenterFrequency(hz: Long): Int = 0
 
     override fun setSampleRate(sps: Int) {}
@@ -113,4 +117,13 @@ class WavIqFileSource(
     override fun setPpm(ppm: Int) {}
 
     override fun setOption(option: SourceOption) {}
+
+    companion object {
+        /**
+         * Nanoseconds after the start of playback at which sample number [emitted] is due at [sampleRate],
+         * computed as whole seconds plus remainder so that it cannot overflow a Long.
+         */
+        fun dueNanos(emitted: Long, sampleRate: Int): Long =
+            (emitted / sampleRate) * 1_000_000_000L + (emitted % sampleRate) * 1_000_000_000L / sampleRate
+    }
 }
