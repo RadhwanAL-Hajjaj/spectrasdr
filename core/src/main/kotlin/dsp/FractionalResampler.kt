@@ -61,8 +61,14 @@ class FractionalResampler(
     /** Upper bound of output frames for [frames] input frames at the current correction. */
     fun maxOutput(frames: Int): Int = (frames / (baseStep * (1 - abs(correction) - 1e-3))).toInt() + 2
 
-    /** Resamples [frames] interleaved frames from [input] into [output]; returns output frames. */
+    /**
+     * Resamples [frames] interleaved frames from [input] into [output]; returns output frames.
+     * [output] must hold [maxOutput] frames for the correction in force.
+     */
     fun process(input: FloatArray, frames: Int, output: FloatArray): Int {
+        require(output.size >= channels * maxOutput(frames)) {
+            "output holds ${output.size} values but $frames input frames can produce ${channels * maxOutput(frames)}"
+        }
         val hist = tapsPerPhase - 1
         val need = channels * (hist + frames)
         if (buf.size < need) buf = buf.copyOf(need)

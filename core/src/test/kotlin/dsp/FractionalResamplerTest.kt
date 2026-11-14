@@ -79,4 +79,17 @@ class FractionalResamplerTest {
         assertEquals(mWhole, mSplit)
         for (i in 0 until mWhole) assertEquals(outWhole[i], outSplit[i], 1e-6f)
     }
+
+    @Test
+    fun rejectsAnOutputBufferThatCouldOverflow() {
+        val r = FractionalResampler(2, 12_000.0, 48_000.0)
+        val input = FloatArray(2 * 100)
+        r.process(input, 100, FloatArray(2 * r.maxOutput(100)))
+        try {
+            r.process(input, 100, FloatArray(2 * 400))   // 100 frames in give 400 out; the bound is higher
+            org.junit.Assert.fail("expected IllegalArgumentException")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message, e.message!!.contains("100 input frames"))
+        }
+    }
 }

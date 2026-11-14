@@ -59,4 +59,43 @@ class PllTest {
         assertFalse(pll.locked)
         assertTrue("amplitude ${pll.amplitude}", pll.amplitude < 1e-6)
     }
+
+    private fun pilot(n: Int) = FloatArray(n) { (0.09 * cos(2 * PI * 19_000.0 * it / fs)).toFloat() }
+
+    @Test
+    fun phaseStaysBelowTwoPi() {
+        val n = 480_000
+        val phase = FloatArray(n)
+        Pll(fs, 19_000.0).process(pilot(n), n, phase)
+        for (i in 0 until n) assertTrue("phase[$i] = ${phase[i]}", phase[i] >= 0f && phase[i].toDouble() < 2 * PI)
+    }
+
+    @Test
+    fun sineAndCosineOutputsMatchThePhase() {
+        val n = 48_000
+        val x = pilot(n)
+        val phase = FloatArray(n)
+        val sine = FloatArray(n)
+        val cosine = FloatArray(n)
+        Pll(fs, 19_000.0).process(x, n, phase)
+        val pll = Pll(fs, 19_000.0)
+        pll.processSinCos(x, n, sine, cosine)
+        assertTrue(pll.locked)
+        for (i in 0 until n) {
+            assertEquals(sin(phase[i].toDouble()), sine[i].toDouble(), 1e-5)
+            assertEquals(cos(phase[i].toDouble()), cosine[i].toDouble(), 1e-5)
+        }
+    }
+
+    @Test
+    fun resetDropsTheLock() {
+        val n = 240_000
+        val pll = Pll(fs, 19_000.0)
+        pll.process(pilot(n), n, FloatArray(n))
+        assertTrue(pll.locked)
+        pll.reset()
+        assertFalse(pll.locked)
+        assertEquals(0.0, pll.amplitude, 0.0)
+        assertEquals(19_000.0, pll.frequencyHz, 1e-9)
+    }
 }

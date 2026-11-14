@@ -7,7 +7,8 @@ import kotlin.math.pow
 
 /**
  * Peak-tracking AGC for real audio (AM, SSB, CW — §6.4): fast attack, hang, then slow decay. The
- * output peak settles at [targetPeak]; gain never exceeds [maxGainDb].
+ * output peak settles at [targetPeak]; gain never exceeds [maxGainDb]. The output is clamped to
+ * ±1.0, so the first milliseconds of a loud signal after silence clip instead of overshooting.
  */
 class Agc(
     sampleRate: Double,
@@ -25,19 +26,34 @@ class Agc(
     private var hang = 0
 
     fun process(data: FloatArray, count: Int) {
+        var env = envelope
+        var h = hang
         for (i in 0 until count) {
             val x = data[i]
             val a = abs(x)
-            if (a > envelope) {
-                envelope += (a - envelope) * attack
-                hang = hangSamples
-            } else if (hang > 0) {
-                hang--
-            } else {
-                envelope += (a - envelope) * decay
+            if (!(a <= Float.MAX_VALUE)) {   // NaN or infinite: mute the sample and keep the state
+                data[i] = 0f
+                continue
             }
-            if (envelope < minEnvelope) envelope = minEnvelope
-            data[i] = x * (targetPeak / envelope)
+            if (a > env) {
+                env += (a - env) * attack
+                h = hangSamples
+            } else if (h > 0) {
+                h--
+            } else {
+                env += (a - env) * decay
+            }
+            if (env < minEnvelope) env = minEnvelope
+            val y = x * (targetPeak / env)
+            data[i] = if (y > 1f) 1f else if (y < -1f) -1f else y
         }
+        envelope = env
+        hang = h
+    }
+
+    /** Returns to the resting state (full gain), for use after a retune. */
+    fun reset() {
+        envelope = minEnvelope
+        hang = 0
     }
 }
