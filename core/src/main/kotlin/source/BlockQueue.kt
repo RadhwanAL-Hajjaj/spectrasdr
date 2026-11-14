@@ -9,7 +9,15 @@ import kotlin.concurrent.withLock
  * Bounded FIFO between a source thread and the DSP thread. When full, the oldest block is released
  * back to its pool and [overruns] increases, so a slow consumer never stalls the source (§4.3).
  */
-class BlockQueue(val capacity: Int) {
+class BlockQueue(capacity: Int) {
+    /** Blocks held at most. Lowering it takes effect at the next [offer], which drops the surplus. */
+    @Volatile
+    var capacity: Int = capacity
+        set(value) {
+            require(value >= 1) { "capacity must be >= 1" }
+            field = value
+        }
+
     private val items = ArrayDeque<IqBlock>(capacity)
     private val lock = ReentrantLock()
     private val notEmpty = lock.newCondition()
@@ -24,16 +32,19 @@ class BlockQueue(val capacity: Int) {
 
     fun offer(block: IqBlock) {
         var dropped: IqBlock? = null
+        var more: ArrayList<IqBlock>? = null   // only after the capacity was lowered
         lock.withLock {
-            if (items.size >= capacity) {
-                dropped = items.removeFirst()
+            while (items.size >= capacity) {
+                val oldest = items.removeFirst()
                 overruns++
+                if (dropped == null) dropped = oldest else (more ?: ArrayList<IqBlock>().also { more = it }).add(oldest)
             }
             items.addLast(block)
             offered++
             notEmpty.signal()
         }
         dropped?.release()
+        more?.forEach { it.release() }
     }
 
     /** Waits up to [timeoutMs] for a block; returns null on timeout. */

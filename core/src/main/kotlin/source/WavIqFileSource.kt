@@ -110,7 +110,8 @@ class WavIqFileSource(
      */
     override fun setCenterFrequency(hz: Long): Int = 0
 
-    override fun setSampleRate(sps: Int) {}
+    /** Ignored: the file plays at its recorded rate. */
+    override fun setSampleRate(sps: Int): Int = 0
 
     override fun setGain(gain: GainSetting) {}
 

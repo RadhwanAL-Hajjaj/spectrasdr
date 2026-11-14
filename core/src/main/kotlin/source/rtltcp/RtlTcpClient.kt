@@ -163,12 +163,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         }
     }
 
-    override fun setSampleRate(sps: Int) {
+    override fun setSampleRate(sps: Int): Int =
         retune(listOf(TimedCommand(RtlTcpProtocol.SET_SAMPLE_RATE, sps))) {
             requestedRate = sps
             sampleRate = sps
         }
-    }
 
     override fun setGain(gain: GainSetting) {
         synchronized(tuneLock) {
@@ -399,8 +398,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
             while (running) {
                 if (probeRequested && !discarding && have == 0) {
                     probeRequested = false
-                    block?.let { if (it.length > 0) listener.onBlock(it) else it.release() }
-                    block = null
+                    val partial = block
+                    block = null   // cleared first: the listener owns the block from here on
+                    if (partial != null) {
+                        if (partial.length > 0) listener.onBlock(partial) else partial.release()
+                    }
                     runProbe(input)
                     continue
                 }
@@ -419,8 +421,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                         sync.onRetuneRequested(newEpoch - observedEpoch, bps, pendingRate)
                         observedEpoch = newEpoch
                         discarding = true
-                        block?.let { if (it.length > 0) listener.onBlock(it) else it.release() }
+                        val partial = block
                         block = null
+                        if (partial != null) {
+                            if (partial.length > 0) listener.onBlock(partial) else partial.release()
+                        }
                     }
                     if (discarding) {
                         val boundary = sync.scan(buf, pos, whole - pos)
@@ -451,8 +456,8 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                     b.length += got
                     pos += got * bps
                     if (b.length == b.capacity) {
-                        listener.onBlock(b)
                         block = null
+                        listener.onBlock(b)
                     }
                 }
                 val rest = have - whole

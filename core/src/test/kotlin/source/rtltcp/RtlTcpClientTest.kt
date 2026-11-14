@@ -4,15 +4,20 @@ package io.github.radhwanalhajjaj.spectrasdr.core.source.rtltcp
 import io.github.radhwanalhajjaj.spectrasdr.core.source.CollectingListener
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainModel
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
+import io.github.radhwanalhajjaj.spectrasdr.core.source.IqBlock
 import io.github.radhwanalhajjaj.spectrasdr.core.source.OptionKind
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
+import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceInfo
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceKind
+import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceListener
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.net.ServerSocket
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit.SECONDS
+import java.util.concurrent.atomic.AtomicReference
 
 class RtlTcpClientTest {
     private fun client(port: Int, tweak: (RtlTcpConfig) -> RtlTcpConfig = { it }) =
@@ -188,6 +193,54 @@ class RtlTcpClientTest {
             l.awaitEpochSamples(epoch = epoch, complex = 1_000)
             assertTrue(l.blocksOf(epoch).all { it.centerHz == 300_000_000L })
             c.close()
+        }
+    }
+
+    @Test
+    fun sampleRateChangesReturnTheirEpoch() {
+        FakeRtlTcpServer().start().use { server ->
+            val l = CollectingListener()
+            val c = client(server.port)
+            c.open(l)
+            l.awaitEpochSamples(epoch = 1, complex = 1_000)
+            val epoch = c.setSampleRate(1_024_000)
+            assertEquals(2, epoch)
+            l.awaitEpochSamples(epoch = epoch, complex = 1_000)
+            assertTrue(l.blocksOf(epoch).all { it.sampleRate == 1_024_000 })
+            c.close()
+        }
+    }
+
+    @Test
+    fun aListenerThatFailsAfterReleasingItsBlockIsReportedAsItself() {
+        val uncaught = AtomicReference<Throwable>()
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> uncaught.set(e) }
+        try {
+            FakeRtlTcpServer().start().use { server ->
+                val stopped = CountDownLatch(1)
+                val c = client(server.port)
+                c.open(object : SourceListener {
+                    override fun onStarted(info: SourceInfo) {}
+
+                    override fun onBlock(block: IqBlock) {
+                        block.release()
+                        throw IllegalStateException("listener failed")
+                    }
+
+                    override fun onError(error: SourceError) {}
+
+                    override fun onStopped() = stopped.countDown()
+                })
+                assertTrue(stopped.await(5, SECONDS))
+                val deadline = System.currentTimeMillis() + 5_000
+                while (uncaught.get() == null && System.currentTimeMillis() < deadline) Thread.sleep(5)
+                // Before the fix the reader released the block a second time and that error hid this one.
+                assertEquals("listener failed", uncaught.get()?.message)
+                c.close()
+            }
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
         }
     }
 

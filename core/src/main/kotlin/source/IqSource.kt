@@ -85,9 +85,10 @@ interface SourceListener {
 }
 
 /**
- * A stream of IQ samples produced on the source's own thread. [setCenterFrequency] returns a tune
- * epoch E: blocks with tuneEpoch ≥ E are at the requested frequency or a later one (§7.1).
- * A source whose `info.canTune` is false ignores the request and returns its current epoch.
+ * A stream of IQ samples produced on the source's own thread. [setCenterFrequency] and
+ * [setSampleRate] return a tune epoch E: blocks with tuneEpoch ≥ E were taken after the change
+ * (§7.1). A source that cannot tune (`info.canTune` is false) or has a fixed sample rate ignores
+ * the request and returns its current epoch; every block states its own frequency and rate.
  */
 interface IqSource {
     val info: SourceInfo
@@ -99,7 +100,7 @@ interface IqSource {
 
     fun setCenterFrequency(hz: Long): Int
 
-    fun setSampleRate(sps: Int)
+    fun setSampleRate(sps: Int): Int
 
     fun setGain(gain: GainSetting)
 

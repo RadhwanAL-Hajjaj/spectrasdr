@@ -68,4 +68,23 @@ class BlockQueueTest {
         assertEquals(0, q.size)
         assertEquals(3, pool.freeCount)
     }
+
+    @Test
+    fun loweringTheCapacityDropsTheOldestBlocksAtTheNextOffer() {
+        val pool = BlockPool(4)
+        val q = BlockQueue(8)
+        for (i in 0 until 6) q.offer(pool.obtain().apply { seq = i.toLong() })
+        q.capacity = 3
+        assertEquals(6, q.size)
+        q.offer(pool.obtain().apply { seq = 6 })
+        assertEquals(3, q.size)
+        assertEquals(4L, q.overruns)
+        assertEquals(4, pool.freeCount)
+        assertEquals(4L, q.take(10)!!.seq)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun capacityMustBePositive() {
+        BlockQueue(4).capacity = 0
+    }
 }
