@@ -66,4 +66,52 @@ object Signals {
         }
         return count / ((last - first) / rate)
     }
+
+    /**
+     * Least-squares fit of a·sin + b·cos + dc at [freqHz] to one channel of [x] over frames
+     * [from, to). Returns the tone amplitude and the mean power of what the fit leaves over.
+     */
+    private fun toneFit(x: FloatArray, freqHz: Double, rate: Double, from: Int, to: Int, channels: Int, channel: Int): DoubleArray {
+        var ss = 0.0
+        var sc = 0.0
+        var cc = 0.0
+        var s1 = 0.0
+        var c1 = 0.0
+        var xs = 0.0
+        var xc = 0.0
+        var x1 = 0.0
+        var xx = 0.0
+        val w = 2 * PI * freqHz / rate
+        for (k in from until to) {
+            val s = sin(w * k)
+            val c = cos(w * k)
+            val v = x[k * channels + channel].toDouble()
+            ss += s * s
+            sc += s * c
+            cc += c * c
+            s1 += s
+            c1 += c
+            xs += v * s
+            xc += v * c
+            x1 += v
+            xx += v * v
+        }
+        val n = (to - from).toDouble()
+        val det = ss * (cc * n - c1 * c1) - sc * (sc * n - c1 * s1) + s1 * (sc * c1 - cc * s1)
+        val a = (xs * (cc * n - c1 * c1) - sc * (xc * n - c1 * x1) + s1 * (xc * c1 - cc * x1)) / det
+        val b = (ss * (xc * n - c1 * x1) - xs * (sc * n - c1 * s1) + s1 * (sc * x1 - xc * s1)) / det
+        val d = (ss * (cc * x1 - xc * c1) - sc * (sc * x1 - xc * s1) + xs * (sc * c1 - cc * s1)) / det
+        val residual = maxOf(0.0, (xx - a * xs - b * xc - d * x1) / n)
+        return doubleArrayOf(hypot(a, b), residual)
+    }
+
+    /** Amplitude of the real tone at [freqHz] in one channel of [x] over frames [from, to). */
+    fun toneAmplitude(x: FloatArray, freqHz: Double, rate: Double, from: Int, to: Int, channels: Int = 1, channel: Int = 0): Double =
+        toneFit(x, freqHz, rate, from, to, channels, channel)[0]
+
+    /** Signal-to-noise-and-distortion ratio in dB of the real tone at [freqHz] over frames [from, to). */
+    fun sinadDb(x: FloatArray, freqHz: Double, rate: Double, from: Int, to: Int, channels: Int = 1, channel: Int = 0): Double {
+        val fit = toneFit(x, freqHz, rate, from, to, channels, channel)
+        return 10 * log10(fit[0] * fit[0] / 2 / (fit[1] + 1e-30))
+    }
 }
