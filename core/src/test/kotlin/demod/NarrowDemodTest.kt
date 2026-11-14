@@ -63,6 +63,15 @@ class NarrowDemodTest {
     }
 
     @Test
+    fun nfmReducesAnUpperCtcssToneByAtLeastFifteenDecibelsWithDeemphasis() {
+        val audio = run(NfmDemod(fs), nfmSignal(203.5, 500.0))
+        val n = audio.size
+        val flat = 500.0 / 5_000.0
+        val level = 20 * log10(Signals.toneAmplitude(audio, 203.5, fs, n / 2, n) / flat)
+        assertTrue("203.5 Hz at $level dB relative to a flat demodulator", level <= -15.0)
+    }
+
+    @Test
     fun nfmWithoutDeemphasisIsFlat() {
         val demod = NfmDemod(fs, deviationHz = 2_500.0, deemphasis = false)
         val low = run(demod, nfmSignal(600.0, 1_250.0))

@@ -7,8 +7,11 @@ import kotlin.math.PI
 import kotlin.math.sqrt
 
 /**
- * Narrow-band FM demodulator (§6.4): discriminator scaled so that ±[deviationHz] is ±1.0, a 300 Hz
- * high-pass that removes CTCSS tones, a 3.5 kHz low-pass and optional de-emphasis. The de-emphasis
+ * Narrow-band FM demodulator (§6.4): discriminator scaled so that ±[deviationHz] is ±1.0, an
+ * 8th-order 300 Hz high-pass, a 3.5 kHz low-pass and optional de-emphasis. With de-emphasis on,
+ * sub-audible (CTCSS) tones up to about 200 Hz are reduced by at least 15 dB relative to their level
+ * at the discriminator; the highest tones (around 250 Hz) lie too close to the 300 Hz corner and are
+ * reduced by only a few dB. The de-emphasis
  * is the 6 dB/octave slope above 300 Hz that two-way radios pre-emphasise for, with its gain made
  * up so that a 1 kHz tone keeps its level.
  */
@@ -21,7 +24,7 @@ class NfmDemod(
     override val channels: Int = 1
 
     private val discriminator = FmDiscriminator(inputRate, deviationHz)
-    private val highPass = BiquadCascade.highPass(1, 4, 300.0, inputRate)
+    private val highPass = BiquadCascade.highPass(1, 8, 300.0, inputRate)
     private val lowPass = BiquadCascade.lowPass(1, 4, 3_500.0, inputRate)
     private val deemphasisFilter = if (deemphasis) Deemphasis(1, 1 / (2 * PI * CORNER_HZ), inputRate) else null
     private val makeUp = sqrt(1 + (1_000.0 / CORNER_HZ) * (1_000.0 / CORNER_HZ)).toFloat()
