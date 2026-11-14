@@ -141,17 +141,34 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         }
     }
 
+    /**
+     * Stops the source. With [RtlTcpConfig.sendExitOnClose] the exit command is written and only the
+     * output side is shut down; the reader keeps reading (and releasing, not delivering, blocks) until
+     * the peer closes, for at most [EXIT_GRACE_MS], so the peer can read the exit command before the
+     * socket is closed (closing a socket with unread input resets it and the peer loses its unread
+     * commands). Then the socket is closed. Without it the socket is closed at once.
+     */
     override fun close() {
         if (closed) return
         closed = true
+        val reader = readerThread?.takeIf { it !== Thread.currentThread() }
         if (running && config.sendExitOnClose) {
             // The reader is still running, so the socket stays open until the exit command is written.
-            runCatching { commands.submit { writeCommand(RtlTcpProtocol.ANDROID_EXIT, 0) }.get(1, TimeUnit.SECONDS) }
+            val connected = output != null
+            val sent = runCatching {
+                commands.submit {
+                    writeCommand(RtlTcpProtocol.ANDROID_EXIT, 0)
+                    // Queued on the command thread: no command can follow the exit on the wire.
+                    runCatching { socket?.shutdownOutput() }
+                }.get(1, TimeUnit.SECONDS)
+            }.isSuccess
+            // The reader ends when the peer closes (end of stream is no error once closed is set).
+            if (sent && connected) reader?.join(EXIT_GRACE_MS)
         }
         running = false
         commands.shutdownNow()
         runCatching { socket?.close() }
-        readerThread?.takeIf { it !== Thread.currentThread() }?.join(2_000)
+        reader?.join(2_000)
     }
 
     /** @throws IllegalArgumentException if [hz] is outside 0..4294967295 (the range of rtl_tcp's 32-bit field). */
@@ -401,7 +418,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                     val partial = block
                     block = null   // cleared first: the listener owns the block from here on
                     if (partial != null) {
-                        if (partial.length > 0) listener.onBlock(partial) else partial.release()
+                        if (partial.length > 0) deliver(listener, partial) else partial.release()
                     }
                     runProbe(input)
                     continue
@@ -424,7 +441,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                         val partial = block
                         block = null
                         if (partial != null) {
-                            if (partial.length > 0) listener.onBlock(partial) else partial.release()
+                            if (partial.length > 0) deliver(listener, partial) else partial.release()
                         }
                     }
                     if (discarding) {
@@ -457,7 +474,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                     pos += got * bps
                     if (b.length == b.capacity) {
                         block = null
-                        listener.onBlock(b)
+                        deliver(listener, b)
                     }
                 }
                 val rest = have - whole
@@ -467,6 +484,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         } finally {
             block?.release()
         }
+    }
+
+    /** Hands [block] to the listener, or releases it once [close] has begun. */
+    private fun deliver(listener: SourceListener, block: IqBlock) {
+        if (closed) block.release() else listener.onBlock(block)
     }
 
     private fun rtlInfo(gains: List<Int>) = SourceInfo(
@@ -589,6 +611,9 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
             250_000, 1_024_000, 1_536_000, 1_792_000, 1_920_000, 2_048_000,
             2_160_000, 2_400_000, 2_560_000, 2_880_000, 3_200_000,
         )
+
+        /** How long close() waits for the peer to read the exit command and close. */
+        const val EXIT_GRACE_MS = 1_000L
 
         /** Frequencies travel as unsigned 32-bit values. */
         fun freqParam(hz: Long): Int = (hz and 0xFFFFFFFFL).toInt()

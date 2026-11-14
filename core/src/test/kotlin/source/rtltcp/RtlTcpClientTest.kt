@@ -183,6 +183,20 @@ class RtlTcpClientTest {
     }
 
     @Test
+    fun theExitCommandReachesADriverThatReadsLate() {
+        FakeRtlTcpServer(commandReadDelayMs = 300).start().use { server ->
+            val l = CollectingListener()
+            val c = client(server.port) { it.copy(sendExitOnClose = true, kind = SourceKind.ANDROID_DRIVER) }
+            c.open(l)
+            assertTrue(l.started.await(5, SECONDS))
+            c.close()
+            server.awaitCommands(3)
+            assertEquals(RtlTcpProtocol.ANDROID_EXIT, server.commands.last().first)
+            assertTrue("errors: ${l.errors.map { it.message }}", l.errors.isEmpty())
+        }
+    }
+
+    @Test
     fun blocksCarryTheirEpochAndFrequency() {
         FakeRtlTcpServer().start().use { server ->
             val l = CollectingListener()

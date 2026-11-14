@@ -37,6 +37,8 @@ class FakeRtlTcpServer(
     /** Stream at this many samples per second instead of as fast as possible. */
     private val pacedSamplesPerSecond: Double? = null,
     initialCenterHz: Long = 100_000_000,
+    /** The command reader waits this long before the first command, like a busy driver app. */
+    private val commandReadDelayMs: Long = 0,
 ) : AutoCloseable {
     private val server = ServerSocket(0)
     val port: Int get() = server.localPort
@@ -92,11 +94,16 @@ class FakeRtlTcpServer(
             var testOnScheduled = 0L
             var testOnNanos = 0L
             runCatching {
+                if (commandReadDelayMs > 0) Thread.sleep(commandReadDelayMs)
                 while (!closed) {
                     input.readFully(cmd)
                     val code = cmd[0].toInt() and 0xFF
                     val param = RtlTcpProtocol.readIntBE(cmd, 1)
                     commands += code to param
+                    if (code == RtlTcpProtocol.ANDROID_EXIT) {
+                        socket.close()   // the driver app drops the connection on exit
+                        break
+                    }
                     val arrival = System.nanoTime()
                     synchronized(lock) {
                         var scheduled = sampleIndex + pipelineDelaySamples
