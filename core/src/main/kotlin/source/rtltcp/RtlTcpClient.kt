@@ -152,6 +152,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
         if (closed) return
         closed = true
         val reader = readerThread?.takeIf { it !== Thread.currentThread() }
+        var interrupted = false   // an interrupt never skips the cleanup; the flag is restored at the end
         if (running && config.sendExitOnClose) {
             // The reader is still running, so the socket stays open until the exit command is written.
             val connected = output != null
@@ -161,14 +162,25 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                     // Queued on the command thread: no command can follow the exit on the wire.
                     runCatching { socket?.shutdownOutput() }
                 }.get(1, TimeUnit.SECONDS)
-            }.isSuccess
+            }.onFailure { if (it is InterruptedException) interrupted = true }.isSuccess
             // The reader ends when the peer closes (end of stream is no error once closed is set).
-            if (sent && connected) reader?.join(EXIT_GRACE_MS)
+            if (sent && connected) {
+                try {
+                    reader?.join(EXIT_GRACE_MS)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
         }
         running = false
         commands.shutdownNow()
         runCatching { socket?.close() }
-        reader?.join(2_000)
+        try {
+            reader?.join(2_000)
+        } catch (_: InterruptedException) {
+            interrupted = true
+        }
+        if (interrupted) Thread.currentThread().interrupt()
     }
 
     /** @throws IllegalArgumentException if [hz] is outside 0..4294967295 (the range of rtl_tcp's 32-bit field). */

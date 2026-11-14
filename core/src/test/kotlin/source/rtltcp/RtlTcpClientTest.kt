@@ -197,6 +197,28 @@ class RtlTcpClientTest {
     }
 
     @Test
+    fun closeFinishesItsCleanupWhenTheCallerIsInterruptedDuringTheGraceWait() {
+        FakeRtlTcpServer(commandReadDelayMs = 5_000).start().use { server ->
+            val l = CollectingListener()
+            val c = client(server.port) { it.copy(sendExitOnClose = true, kind = SourceKind.ANDROID_DRIVER) }
+            c.open(l)
+            assertTrue(l.started.await(5, SECONDS))
+            val flagAfterClose = java.util.concurrent.atomic.AtomicBoolean(false)
+            val caller = Thread {
+                c.close()
+                flagAfterClose.set(Thread.currentThread().isInterrupted)
+            }
+            caller.start()
+            Thread.sleep(300)   // close() is now waiting for the peer, which reads nothing
+            caller.interrupt()
+            caller.join(3_000)
+            assertTrue("close() did not return", !caller.isAlive)
+            assertTrue("interrupt flag lost", flagAfterClose.get())
+            assertTrue("client was not closed", l.stopped.await(3, SECONDS))
+        }
+    }
+
+    @Test
     fun blocksCarryTheirEpochAndFrequency() {
         FakeRtlTcpServer().start().use { server ->
             val l = CollectingListener()
