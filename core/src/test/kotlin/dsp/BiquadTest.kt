@@ -24,7 +24,8 @@ class BiquadTest {
         val lp = BiquadCascade.lowPass(1, 4, 3_500.0, fs)
         assertEquals(0.0, gainDb(lp, 500.0), 0.1)
         assertEquals(-3.0, gainDb(lp, 3_500.0), 0.2)
-        assertEquals(-24.1, gainDb(lp, 7_000.0), 2.0)
+        // −24.1 dB for the analog prototype; the bilinear transform makes the digital filter steeper near Nyquist.
+        assertEquals(-26.0, gainDb(lp, 7_000.0), 0.3)
         assertTrue(gainDb(lp, 14_000.0) < -45.0)
     }
 
