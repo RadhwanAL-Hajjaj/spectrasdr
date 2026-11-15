@@ -25,7 +25,8 @@ import kotlin.math.roundToLong
  *
  * Tuning follows [TuningPolicy]: a new frequency inside the stream only moves the channel; one
  * outside it retunes the source, and the blocks taken before the retune took effect are discarded
- * by their tune epoch (§7.1).
+ * by their tune epoch (§7.1). A frequency the source refuses is not taken: [settings] goes back to
+ * the frequency in force and the refused tuner frequency is not asked for again.
  *
  * One receiver is one session: [start] it once and [stop] it once. The receiver opens and closes
  * the source.
@@ -65,6 +66,7 @@ class Receiver(
     // Everything below is touched by the DSP thread only.
     private var applied: ReceiverSettings? = null
     private var wantedCenterHz: Long? = null
+    private var refusedCenterHz: Long? = null
     private var requiredEpoch = 0
     private var tuned = false
     private var chain: ReceiverChain? = null
@@ -265,13 +267,18 @@ class Receiver(
         }
         if (source.info.canTune) {
             val center = TuningPolicy.plan(s.frequencyHz, wantedCenterHz, s.sampleRate, s.mode, s.bandwidthHz, s.cwPitchHz, usableFraction)
-            if (center != wantedCenterHz) {
+            if (center == wantedCenterHz) {
+                refusedCenterHz = null
+            } else if (center != refusedCenterHz) {
                 try {
                     requiredEpoch = maxOf(requiredEpoch, source.setCenterFrequency(center))
                     wantedCenterHz = center
+                    refusedCenterHz = null
                     moved = true
                 } catch (e: IllegalArgumentException) {
+                    refusedCenterHz = center   // not asked again until the plan wants another one
                     listener.onWarning(e.message ?: "The source cannot tune to $center Hz")
+                    if (old != null) revertFrequency(s, old.frequencyHz)
                 }
             }
         }
@@ -284,6 +291,17 @@ class Receiver(
             }
         } else if (old != null && s.frequencyHz != old.frequencyHz) {
             chain?.resetDecoders()   // another station inside the same stream
+        }
+    }
+
+    /** Puts the frequency in force back after the source refused [refused]'s, unless the user has asked for another since. */
+    private fun revertFrequency(refused: ReceiverSettings, frequencyHz: Long) {
+        synchronized(settingsLock) {
+            val current = settings
+            if (current.frequencyHz != refused.frequencyHz) return
+            val reverted = current.copy(frequencyHz = frequencyHz)
+            if (current === refused) applied = reverted
+            settings = reverted
         }
     }
 

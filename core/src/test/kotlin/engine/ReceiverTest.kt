@@ -167,6 +167,18 @@ class ReceiverTest {
         await("more blocks") { r.status.blocks > blocks + 10 }
         assertEquals(100_000_000L, r.status.centerHz)
         assertTrue(events.errors.isEmpty())
+        assertEquals(1, events.warnings.size)
+        await("the frequency in force is put back") { r.settings.frequencyHz == 100_000_000L }
+        val more = r.status.blocks
+        await("blocks after the refusal") { r.status.blocks > more + 5 }
+        assertEquals(100_000_000L, r.status.frequencyHz)
+        r.update { it.copy(volume = 0.5f) }
+        val afterVolume = r.status.blocks
+        await("blocks after the volume change") { r.status.blocks > afterVolume + 10 }
+        assertEquals(1, events.warnings.size)
+        assertEquals(1, source.calls.count { it == "freq 2000000000" })
+        r.update { it.copy(frequencyHz = 101_000_000) }
+        await("a valid retune") { r.status.tuned && r.status.centerHz == 101_000_000L }
     }
 
     @Test

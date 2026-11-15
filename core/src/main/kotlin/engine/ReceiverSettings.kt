@@ -93,7 +93,10 @@ interface ReceiverListener {
     /** The decoded RDS data changed; an empty [RdsState] means there is none (any more). */
     fun onRds(state: RdsState) {}
 
-    /** A request could not be carried out (for example a frequency the source cannot tune); the receiver carries on. */
+    /**
+     * A request could not be carried out (for example a frequency the source cannot tune); the receiver carries on.
+     * A refused frequency is not taken: [Receiver.settings] goes back to the frequency in force.
+     */
     fun onWarning(message: String) {}
 
     /** The source failed; [onStopped] follows. */
