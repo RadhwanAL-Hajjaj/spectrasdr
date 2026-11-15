@@ -22,7 +22,8 @@ class SpectrumFrame(val size: Int) {
 /**
  * Turns the IQ stream into spectrum frames at the display rate (§6.2). Every frame averages up to
  * [maxFftsPerFrame] FFTs of the newest samples, then applies exponential averaging on linear power
- * and a decaying peak hold. The DSP thread calls [process]; any thread may call [latest].
+ * and a decaying peak hold. One thread, the DSP thread, calls [process] and [reset]; any thread
+ * may call [latest] and read [noiseDensityDb].
  *
  * The analyzer also estimates the noise floor ([noiseDensityDb]) over the central [usableFraction]
  * of the band, where the tuner's filters are flat.
@@ -41,24 +42,29 @@ class SpectrumAnalyzer(
         require(usableFraction > 0.0 && usableFraction <= 1.0) { "usable fraction must be above 0 and at most 1" }
     }
 
-    /** Weight of the newest frame in the average, 0.1–1 (1 = no averaging). */
+    /**
+     * Weight of the newest frame in the average, 0.1–1 (1 = no averaging). Volatile, taken at the
+     * next frame; a [io.github.radhwanalhajjaj.spectrasdr.core.engine.Receiver] sets it on its DSP
+     * thread from its settings.
+     */
     @Volatile
     var averaging = 0.5
 
-    /** How fast held peaks fall, in dB per second. */
+    /** How fast held peaks fall, in dB per second. Volatile and set like [averaging]. */
     @Volatile
     var peakDecayDbPerSecond = 20.0
 
     /**
      * Noise floor of the stream as a power density in dBFS per hertz; negative infinity before the
      * first frame. It is the 20th percentile of a slowly averaged spectrum, so it holds while up to
-     * four fifths of the band carry signals, and it reads about 1 dB low.
+     * four fifths of the band carry signals, and it reads about 1 dB low. Updated by [process]; any
+     * thread may read it.
      */
     @Volatile
     var noiseDensityDb = Double.NEGATIVE_INFINITY
         private set
 
-    /** FFTs averaged into the last frame (diagnostics). */
+    /** FFTs averaged into the last frame (diagnostics). DSP thread only. */
     var fftsInLastFrame = 0
         private set
 
@@ -92,7 +98,7 @@ class SpectrumAnalyzer(
         noiseBandwidthBins = fftSize * sumOfSquares / (sum * sum)
     }
 
-    /** Feeds [count] complex samples taken at [sampleRate] around [centerHz]. */
+    /** Feeds [count] complex samples taken at [sampleRate] around [centerHz]. DSP thread only. */
     fun process(samples: FloatArray, count: Int, sampleRate: Int, centerHz: Long) {
         var src = 0
         var left = count
@@ -117,7 +123,7 @@ class SpectrumAnalyzer(
         sinceFrame %= interval
     }
 
-    /** Copies the newest frame into [dst] when it is newer than what [dst] holds; returns whether it copied. */
+    /** Copies the newest frame into [dst] when it is newer than what [dst] holds; returns whether it copied. Any thread. */
     fun latest(dst: SpectrumFrame): Boolean {
         require(dst.size == fftSize) { "frame size ${dst.size} does not match FFT size $fftSize" }
         synchronized(lock) {
@@ -131,7 +137,7 @@ class SpectrumAnalyzer(
         }
     }
 
-    /** Drops the sample history, the averages, the held peaks and the noise estimate, for use after a retune. */
+    /** Drops the sample history, the averages, the held peaks and the noise estimate, for use after a retune. DSP thread only. */
     fun reset() {
         filled = 0
         sinceFrame = 0

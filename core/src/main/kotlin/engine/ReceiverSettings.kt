@@ -87,7 +87,11 @@ data class ReceiverStatus(
     val load: Double = 0.0,
 )
 
-/** Receiver events. Every call comes from the receiver's DSP thread. */
+/**
+ * Receiver events. Every callback runs on the receiver's DSP thread and must return quickly: audio
+ * and spectrum stop while it runs. A callback may call [Receiver.update] and [Receiver.stop] (which
+ * then only asks for the stop and returns at once).
+ */
 interface ReceiverListener {
     /**
      * The source has started streaming; called once per session, before any [onStatus] that reports

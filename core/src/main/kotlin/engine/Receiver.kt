@@ -40,12 +40,15 @@ class Receiver(
     initial: ReceiverSettings,
     private val listener: ReceiverListener,
 ) {
-    /** The settings in force or about to be. */
+    /**
+     * The settings in force or about to be. Any thread may read it. The receiver itself replaces
+     * it when the source refuses a request or the stream has another sample rate.
+     */
     @Volatile
     var settings: ReceiverSettings = initial
         private set
 
-    /** The latest status snapshot. */
+    /** The latest status snapshot, published by the DSP thread. Any thread may read it. */
     @Volatile
     var status = ReceiverStatus()
         private set
@@ -90,17 +93,28 @@ class Receiver(
     private var sinceStatus = 0L
     private var workNanos = 0L
 
-    /** The FFT size of the frames [spectrum] delivers right now. */
+    /**
+     * The FFT size of the frames [spectrum] delivers right now. Any thread may read it; a new
+     * [ReceiverSettings.fftSize] shows here once the DSP thread has taken it, at the next block.
+     */
     val fftSize: Int get() = analyzer.fftSize
 
-    /** Replaces the settings with [change] applied to the current ones. */
+    /**
+     * Replaces the settings with [change] applied to the current ones; they take effect on the DSP
+     * thread at the next block. Any thread may call it, the DSP thread (a listener callback) too.
+     *
+     * [change] runs under a lock: it must be quick and must not call back into the receiver. An
+     * exception it throws reaches the caller and leaves the settings unchanged; for example an
+     * invalid combination, such as a mode change by `copy(mode = …)` that keeps a bandwidth the new
+     * mode does not allow; a mode change goes through [ReceiverSettings.withMode].
+     */
     fun update(change: (ReceiverSettings) -> ReceiverSettings) {
         synchronized(settingsLock) { settings = change(settings) }
     }
 
     /**
      * Copies the newest spectrum into [dst] when there is one newer than [dst] holds; returns
-     * whether it copied. A frame whose size is not [fftSize] gets nothing.
+     * whether it copied. A frame whose size is not [fftSize] gets nothing. Any thread may call it.
      */
     fun spectrum(dst: SpectrumFrame): Boolean {
         val a = analyzer
