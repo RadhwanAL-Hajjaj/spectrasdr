@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "io.github.radhwanalhajjaj.spectrasdr"
-    compileSdk = 36
+    compileSdk = 37   // Compose 1.12 requires API 37 to compile; targetSdk stays 36
 
     defaultConfig {
         applicationId = "io.github.radhwanalhajjaj.spectrasdr"
