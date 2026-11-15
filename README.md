@@ -3,7 +3,8 @@
 Open-source Android SDR receiver: spectrum and waterfall, wideband sweep analyzer, and listening
 (WFM stereo + RDS, NFM, AM, SSB, CW) for RTL-SDR and SDRplay receivers.
 
-Status: early development (core engine).
+Status: the core engine is complete and tested (sources, demodulators, stereo, RDS, spectrum,
+receiver, simulator). The Android app is next.
 
 ## Layout
 
