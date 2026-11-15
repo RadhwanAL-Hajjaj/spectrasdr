@@ -14,7 +14,7 @@ import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceKind
 data class ReceiverSettings(
     /** The frequency listened to, in Hz. The receiver decides where the tuner goes. */
     val frequencyHz: Long,
-    /** IQ sample rate asked of the source. */
+    /** IQ sample rate asked of the source. The receiver puts it back to the stream's rate when the source refuses or ignores the request. */
     val sampleRate: Int,
     val mode: Mode = Mode.WFM,
     val bandwidthHz: Int = mode.defaultBandwidthHz,
@@ -103,7 +103,7 @@ interface ReceiverListener {
 
     /**
      * A request could not be carried out (for example a frequency the source cannot tune); the receiver carries on.
-     * A refused frequency is not taken: [Receiver.settings] goes back to the frequency in force.
+     * A refused frequency or sample rate is not taken: [Receiver.settings] goes back to the one in force.
      */
     fun onWarning(message: String) {}
 

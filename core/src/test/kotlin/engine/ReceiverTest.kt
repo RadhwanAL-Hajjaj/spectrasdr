@@ -370,6 +370,68 @@ class ReceiverTest {
     }
 
     @Test
+    fun aRefusedSampleRateIsPutBackAndTheTunerIsPlannedWithTheRealRate() {
+        val source = ScriptedSource(listOf(SimStation.NarrowFm(100_300_000, pauseSeconds = 0.0)), maxSampleRate = 1_000_000)
+        val sink = CollectingSink()
+        val (r, events) = start(source, ReceiverSettings(100_300_000, 240_000, Mode.NFM), sink)
+        await("the first status") { r.status.tuned }
+        assertEquals(100_240_000L, r.status.centerHz)
+        r.update { it.copy(sampleRate = 2_400_000) }
+        await("the warning") { events.warnings.isNotEmpty() }
+        await("the rate in force is put back") { r.settings.sampleRate == 240_000 }
+        val frames = sink.frames
+        await("audio after the refusal") { sink.frames > frames + 24_000 }
+        r.update { it.copy(volume = 0.5f) }
+        val blocks = r.status.blocks
+        await("blocks after the volume change") { r.status.blocks > blocks + 10 }
+        assertEquals(1, events.warnings.size)
+        assertEquals("not asked again", 1, source.calls.count { it == "rate 2400000" })
+        r.update { it.copy(sampleRate = 2_400_000) }
+        await("the second warning") { events.warnings.size == 2 }
+        await("the second put-back") { r.settings.sampleRate == 240_000 }
+        assertEquals(2, source.calls.count { it == "rate 2400000" })
+        assertTrue("reception was not disturbed", events.statuses.none { it.blocks > 0 && !it.tuned })
+        // A narrow channel outside the stream: the tuner goes a quarter of the real rate below it.
+        r.update { it.copy(frequencyHz = 101_000_000) }
+        await("the retune") { r.status.tuned && r.status.centerHz == 100_940_000L }
+        assertEquals(listOf("freq 100240000", "freq 100940000"), source.calls.filter { it.startsWith("freq") })
+    }
+
+    @Test
+    fun aRefusedFirstSampleRateGivesWayToTheStreamsRate() {
+        val source = ScriptedSource(maxSampleRate = 1_000_000)
+        val (r, events) = start(source, ReceiverSettings(100_300_000, 2_400_000, Mode.NFM))
+        await("the stream's rate in the settings") { r.settings.sampleRate == 240_000 }
+        await("reception at the real rate") { r.status.tuned && r.status.centerHz == 100_240_000L }
+        assertEquals(240_000, r.status.sampleRate)
+        assertEquals(1, events.warnings.size)
+        assertEquals(1, source.calls.count { it.startsWith("rate") })
+        assertEquals(
+            "planned with the refused rate, then with the stream's",
+            listOf("freq 99700000", "freq 100240000"),
+            source.calls.filter { it.startsWith("freq") },
+        )
+    }
+
+    @Test
+    fun aSampleRateTheSourceIgnoresIsNotTakenAndDoesNotInterruptReception() {
+        val source = ScriptedSource(listOf(station), canSetRate = false)
+        val (r, events) = start(source, ReceiverSettings(100_000_000, 240_000))
+        await("the first status") { r.status.tuned }
+        r.update { it.copy(sampleRate = 480_000) }
+        val blocks = r.status.blocks
+        await("more blocks") { r.status.blocks > blocks + 10 }
+        assertTrue("no retune was announced", events.statuses.none { it.blocks > 0 && !it.tuned })
+        await("the stream's rate in the settings") { r.settings.sampleRate == 240_000 }
+        val more = r.status.blocks
+        await("blocks afterwards") { r.status.blocks > more + 10 }
+        assertEquals(1, source.calls.count { it == "rate 480000" })
+        assertEquals(240_000, r.status.sampleRate)
+        assertEquals(0L, r.status.staleBlocks)
+        assertTrue(events.warnings.isEmpty())
+    }
+
+    @Test
     fun aSourceThatNeverConfirmsARetuneDoesNotSilenceTheReceiverForEver() {
         val source = ScriptedSource(pipelineBlocks = Int.MAX_VALUE / 2)
         val (r, events) = start(source, ReceiverSettings(100_000_000, 240_000))

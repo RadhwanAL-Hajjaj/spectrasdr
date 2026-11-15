@@ -38,6 +38,8 @@ class ScriptedSource(
     private val dcOffset: Float = 0f,
     /** The kind [info] shows from [open] on and `onStarted` reports, like a network source after its handshake; null keeps [kind]. */
     private val startedKind: SourceKind? = null,
+    /** Sample rates above this are refused with an IllegalArgumentException. */
+    private val maxSampleRate: Int = Int.MAX_VALUE,
 ) : IqSource {
     @Volatile
     override var info = SourceInfo("Scripted", kind, SampleFormat.S16LE, canTune, listOf(initialSampleRate), GainModel.None, emptySet())
@@ -89,6 +91,7 @@ class ScriptedSource(
 
     override fun setSampleRate(sps: Int): Int {
         calls += "rate $sps"
+        require(sps in 1..maxSampleRate) { "Sample rate $sps is outside 1..$maxSampleRate" }
         return synchronized(lock) {
             if (!canSetRate) return requestedEpoch
             requestedRate = sps

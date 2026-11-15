@@ -25,8 +25,11 @@ import kotlin.math.roundToLong
  *
  * Tuning follows [TuningPolicy]: a new frequency inside the stream only moves the channel; one
  * outside it retunes the source, and the blocks taken before the retune took effect are discarded
- * by their tune epoch (§7.1). A frequency the source refuses is not taken: [settings] goes back to
- * the frequency in force and the refused tuner frequency is not asked for again.
+ * by their tune epoch (§7.1). A frequency or sample rate the source refuses is not taken: [settings]
+ * goes back to the one in force and the refused request is not asked for again until the user
+ * repeats it. The stream is the truth for the sample rate: when the blocks taken after the last
+ * request carry another rate (a refused first request, a source with a fixed rate), [settings]
+ * follows them and the tuner is planned with the real rate.
  *
  * One receiver is one session: [start] it once and [stop] it once. The receiver opens and closes
  * the source.
@@ -72,6 +75,8 @@ class Receiver(
     private var wantedCenterHz: Long? = null
     private var refusedCenterHz: Long? = null
     private var requiredEpoch = 0
+    private var processedEpoch = -1   // tune epoch of the last block processed
+    private var askedRate = 0         // the rate last asked of the source, or the stream's when it delivers another
     private var tuned = false
     private var chain: ReceiverChain? = null
     private var chainRate = 0
@@ -215,7 +220,8 @@ class Receiver(
     private fun process(block: IqBlock) {
         val began = System.nanoTime()
         var s = settings
-        if (s !== applied) s = apply(s)   // what is in force afterwards: a refused frequency is already put back
+        if (s !== applied) s = apply(s)   // what is in force afterwards: a refused frequency or rate is already put back
+        if (block.tuneEpoch >= requiredEpoch && block.sampleRate != s.sampleRate) s = followStream(s, block.sampleRate)
         if (block.tuneEpoch < requiredEpoch) {
             staleSamples += block.length
             if (staleSamples < STALE_LIMIT_SECONDS * block.sampleRate) {
@@ -227,6 +233,7 @@ class Receiver(
             requiredEpoch = block.tuneEpoch
         }
         staleSamples = 0
+        processedEpoch = block.tuneEpoch
         if (!tuned) {
             tuned = true
             chain?.reset()
@@ -298,31 +305,40 @@ class Receiver(
         chain?.let { configure(it, s) }
 
         var moved = false
-        if (old == null || s.sampleRate != old.sampleRate) {
+        var planRate = s.sampleRate
+        if (s.sampleRate != askedRate) {
+            val inForceRate = askedRate
+            askedRate = s.sampleRate
             try {
-                requiredEpoch = maxOf(requiredEpoch, source.setSampleRate(s.sampleRate))
-                moved = true
+                if (moves(source.setSampleRate(s.sampleRate))) moved = true
             } catch (e: IllegalArgumentException) {
                 listener.onWarning(e.message ?: "The source cannot deliver ${s.sampleRate} samples per second")
+                if (old != null) {
+                    // Put back, as a refused frequency is below. A refused first request is corrected by the stream.
+                    planRate = inForceRate
+                    putBack(s, { it.sampleRate == s.sampleRate }) { it.copy(sampleRate = inForceRate) }?.let {
+                        inForce = it
+                        askedRate = inForceRate
+                    }
+                }
             }
         }
         if (source.info.canTune) {
-            val center = TuningPolicy.plan(s.frequencyHz, wantedCenterHz, s.sampleRate, s.mode, s.bandwidthHz, s.cwPitchHz, usableFraction)
+            val center = TuningPolicy.plan(s.frequencyHz, wantedCenterHz, planRate, s.mode, s.bandwidthHz, s.cwPitchHz, usableFraction)
             if (center == wantedCenterHz) {
                 refusedCenterHz = null
             } else if (center != refusedCenterHz) {
                 try {
-                    requiredEpoch = maxOf(requiredEpoch, source.setCenterFrequency(center))
+                    if (moves(source.setCenterFrequency(center))) moved = true
                     wantedCenterHz = center
                     refusedCenterHz = null
-                    moved = true
                 } catch (e: IllegalArgumentException) {
                     refusedCenterHz = center   // not asked again until the plan wants another one
                     listener.onWarning(e.message ?: "The source cannot tune to $center Hz")
                     if (old != null) {
                         // Put back, so the settings no longer hold the refused request and asking for it
                         // again is a new request; only a refused first request has to be remembered.
-                        revertFrequency(s, old.frequencyHz)?.let {
+                        putBack(s, { it.frequencyHz == s.frequencyHz }) { it.copy(frequencyHz = old.frequencyHz) }?.let {
                             inForce = it
                             refusedCenterHz = null
                         }
@@ -343,16 +359,45 @@ class Receiver(
         return inForce
     }
 
-    /** Puts the frequency in force back after the source refused [refused]'s, unless the user has asked for another since. */
-    private fun revertFrequency(refused: ReceiverSettings, frequencyHz: Long): ReceiverSettings? =
+    /**
+     * Takes the tune epoch a request returned; whether the request moves the stream. A source that
+     * ignores a request returns an epoch its blocks already carry.
+     */
+    private fun moves(epoch: Int): Boolean {
+        requiredEpoch = maxOf(requiredEpoch, epoch)
+        return epoch > processedEpoch
+    }
+
+    /**
+     * Replaces the settings with [restore] of the current ones after the request in [refused] could
+     * not be carried out, unless the user has asked for something else since ([unchanged] is false
+     * for the current settings); returns the settings now in force, or null.
+     */
+    private inline fun putBack(
+        refused: ReceiverSettings,
+        unchanged: (ReceiverSettings) -> Boolean,
+        restore: (ReceiverSettings) -> ReceiverSettings,
+    ): ReceiverSettings? =
         synchronized(settingsLock) {
             val current = settings
-            if (current.frequencyHz != refused.frequencyHz) return null
-            val reverted = current.copy(frequencyHz = frequencyHz)
+            if (!unchanged(current)) return null
+            val reverted = restore(current)
             if (current === refused) applied = reverted
             settings = reverted
             reverted
         }
+
+    /**
+     * The stream is the truth: blocks taken after the last request carry [rate] where [s] holds
+     * another (a refused first request, a source with a fixed rate). The settings follow the
+     * stream, unless the user has asked for another rate since, the source is not asked again, and
+     * the tuner is planned with the real rate.
+     */
+    private fun followStream(s: ReceiverSettings, rate: Int): ReceiverSettings {
+        askedRate = rate
+        val followed = putBack(s, { it.sampleRate == s.sampleRate }) { it.copy(sampleRate = rate) } ?: return s
+        return apply(followed)
+    }
 
     /** The chain for blocks at [rate], rebuilt when the rate or a setting that shapes it changed. */
     private fun chainFor(rate: Int, s: ReceiverSettings): ReceiverChain? {
