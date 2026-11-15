@@ -47,8 +47,6 @@ class Receiver(
     var status = ReceiverStatus()
         private set
 
-    private val usableFraction = TuningPolicy.usableFraction(source.info.kind)
-    private val dcRemovalByDefault = defaultDcRemoval(source.info.kind)
     private val queue = BlockQueue(8)
     private val errors = ConcurrentLinkedQueue<SourceError>()
     private val started = AtomicBoolean(false)
@@ -56,12 +54,18 @@ class Receiver(
 
     @Volatile private var running = false
     @Volatile private var sourceEnded = false
-    @Volatile private var analyzer = newAnalyzer(initial)
+    @Volatile private var startedInfo: SourceInfo? = null   // from onStarted, until the DSP thread takes it
     @Volatile private var thread: Thread? = null
 
     // Touched by the source's thread only.
     private var queuedRate = 0
     private var queuedBlockSize = 0
+
+    // Taken from source.info, which may be provisional, until the source has started; from then on
+    // from what onStarted reported. Changed by the DSP thread only.
+    private var usableFraction = TuningPolicy.usableFraction(source.info.kind)
+    private var dcRemovalByDefault = defaultDcRemoval(source.info.kind)
+    @Volatile private var analyzer = newAnalyzer(initial)   // replaced by the DSP thread, read by any thread
 
     // Everything below is touched by the DSP thread only.
     private var applied: ReceiverSettings? = null
@@ -116,7 +120,9 @@ class Receiver(
     }
 
     private val sourceListener = object : SourceListener {
-        override fun onStarted(info: SourceInfo) {}
+        override fun onStarted(info: SourceInfo) {
+            startedInfo = info
+        }
 
         override fun onBlock(block: IqBlock) {
             if (!running) {
@@ -147,6 +153,7 @@ class Receiver(
             while (running) {
                 reportErrors()
                 val block = queue.take(POLL_MS)
+                takeStartedInfo()   // after take: the source reports its start before its first block
                 if (block == null) {
                     if (sourceEnded) break
                     continue
@@ -166,6 +173,19 @@ class Receiver(
             reportErrors()
             listener.onStopped()
         }
+    }
+
+    /** Takes what the source reported in onStarted: its kind decides the usable fraction and the DC removal default. */
+    private fun takeStartedInfo() {
+        val info = startedInfo ?: return
+        startedInfo = null
+        dcRemovalByDefault = defaultDcRemoval(info.kind)
+        val fraction = TuningPolicy.usableFraction(info.kind)
+        if (fraction != usableFraction) {
+            usableFraction = fraction
+            analyzer = newAnalyzer(applied ?: settings)
+        }
+        listener.onSourceStarted(info)
     }
 
     private fun reportErrors() {

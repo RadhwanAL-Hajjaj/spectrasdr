@@ -4,6 +4,7 @@ package io.github.radhwanalhajjaj.spectrasdr.core.engine
 import io.github.radhwanalhajjaj.spectrasdr.core.dsp.WindowType
 import io.github.radhwanalhajjaj.spectrasdr.core.rds.RdsState
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
+import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceInfo
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceKind
 
 /**
@@ -88,6 +89,13 @@ data class ReceiverStatus(
 
 /** Receiver events. Every call comes from the receiver's DSP thread. */
 interface ReceiverListener {
+    /**
+     * The source has started streaming; called once per session, before any [onStatus] that reports
+     * a processed block. From here on [info] (kind, sample rates, gain model, options) is final for
+     * the session.
+     */
+    fun onSourceStarted(info: SourceInfo) {}
+
     fun onStatus(status: ReceiverStatus) {}
 
     /** The decoded RDS data changed; an empty [RdsState] means there is none (any more). */

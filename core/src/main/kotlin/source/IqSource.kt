@@ -91,6 +91,11 @@ interface SourceListener {
  * the request and returns its current epoch; every block states its own frequency and rate.
  */
 interface IqSource {
+    /**
+     * What the source is and can do. Before [SourceListener.onStarted] this may be provisional: a
+     * network source learns its kind and capabilities in the handshake. From `onStarted` on it is
+     * final, and equal to the [SourceInfo] that `onStarted` reports.
+     */
     val info: SourceInfo
     val centerFrequencyHz: Long
 

@@ -36,8 +36,12 @@ class ScriptedSource(
     private val noiseLevel: Float = 0.0005f,
     /** Added to the in-phase samples, like a tuner's DC offset. */
     private val dcOffset: Float = 0f,
+    /** The kind [info] shows from [open] on and `onStarted` reports, like a network source after its handshake; null keeps [kind]. */
+    private val startedKind: SourceKind? = null,
 ) : IqSource {
-    override val info = SourceInfo("Scripted", kind, SampleFormat.S16LE, canTune, listOf(initialSampleRate), GainModel.None, emptySet())
+    @Volatile
+    override var info = SourceInfo("Scripted", kind, SampleFormat.S16LE, canTune, listOf(initialSampleRate), GainModel.None, emptySet())
+        private set
 
     /** Everything asked of the source, in order: "rate 240000", "freq 100000000", "open", "close". */
     val calls = CopyOnWriteArrayList<String>()
@@ -124,6 +128,7 @@ class ScriptedSource(
             pending.clear()   // everything asked before the stream started is already in force
         }
         try {
+            startedKind?.let { info = info.copy(kind = it) }
             listener.onStarted(info)
             while (running) {
                 val error = failure

@@ -4,6 +4,7 @@ package io.github.radhwanalhajjaj.spectrasdr.core.engine
 import io.github.radhwanalhajjaj.spectrasdr.core.rds.RdsState
 import io.github.radhwanalhajjaj.spectrasdr.core.sim.SimStation
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
+import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceInfo
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceKind
 import io.github.radhwanalhajjaj.spectrasdr.core.spectrum.SpectrumFrame
 import io.github.radhwanalhajjaj.spectrasdr.core.testutil.CollectingSink
@@ -28,6 +29,13 @@ class ReceiverTest {
         val order = CopyOnWriteArrayList<String>()
         val stopped = CountDownLatch(1)
         val stops = AtomicInteger()
+
+        /** Each onSourceStarted, with whether a tuned status had come before it. */
+        val starts = CopyOnWriteArrayList<Pair<SourceInfo, Boolean>>()
+
+        override fun onSourceStarted(info: SourceInfo) {
+            starts += info to statuses.any { it.tuned }
+        }
 
         override fun onStatus(status: ReceiverStatus) {
             statuses += status
@@ -204,6 +212,24 @@ class ReceiverTest {
         val listened = events.statuses.drop(firstTuned).map { it.frequencyHz }
         assertTrue("statuses reported $listened", listened.all { it == 100_000_000L })
         assertTrue("the station's data was cleared by a refusal", events.rds.drop(1).none { it.ps.isEmpty() })
+    }
+
+    @Test
+    fun theSourceKindReportedAtTheStartIsTheOneUsed() {
+        // Before its handshake the source looks like an RTL-SDR; it turns out to be an SDRplay.
+        val source = ScriptedSource(kind = SourceKind.RTL_TCP, startedKind = SourceKind.RSP_TCP)
+        val (r, events) = start(source, ReceiverSettings(100_300_000, 240_000, Mode.NFM))
+        await("the first status") { r.status.tuned }
+        val (info, afterTuned) = events.starts.single()
+        assertEquals(SourceKind.RSP_TCP, info.kind)
+        assertFalse("onSourceStarted came after a tuned status", afterTuned)
+        assertEquals(100_240_000L, r.status.centerHz)
+        // 92 kHz from the tuner, a 12.5 kHz channel reaches 98.25 kHz: inside 0.85 × 120 kHz, outside 0.75 × 120 kHz.
+        r.update { it.copy(frequencyHz = 100_332_000) }
+        await("the new channel") { r.status.frequencyHz == 100_332_000L }
+        assertEquals("no retune", 1, source.calls.count { it.startsWith("freq") })
+        assertEquals(100_240_000L, r.status.centerHz)
+        assertEquals(1, events.starts.size)
     }
 
     @Test
