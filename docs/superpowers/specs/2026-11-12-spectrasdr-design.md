@@ -2,6 +2,7 @@
 
 - **Date:** 2026-11-12
 - **Status:** Design approved in chat; this written spec awaits review
+- **Revised:** 2026-11-14 — §4.1, §4.2, §4.3, §6.3, §6.4, §7.1 and §11 aligned with the engine as built (Plans 1 and 2)
 - **License:** GPL-3.0-or-later
 - **Working name:** SpectraSDR (renamable before first release)
 
@@ -47,14 +48,15 @@ Primary test device: Samsung Galaxy S24 Ultra (arm64, Android 14+) with an RTL-S
 | Package | Contents |
 |---------|----------|
 | `source` | `IqSource` interface, sample converters, pooled `IqBlock`, `RtlTcpClient` (rtl_tcp + rsp_tcp extended), `WavIqFileSource`, `SimulatorSource` (synthetic stations), `RetuneSync` (stream markers and latency probe, §7.1) |
-| `dsp` | `Fft`, windows, `Nco`, `FirDesign` (Kaiser windowed-sinc), `FirDecimator` (polyphase, complex), `DecimatorChain`, `FractionalResampler` with drift control, `DcBlocker`, `Agc`, `Deemphasis`, `Pll` |
+| `dsp` | `Fft`, windows, `Nco`, `FirDesign` (Kaiser windowed-sinc), `FirDecimator` (polyphase, complex), `DecimatorChain`, `FractionalResampler` with drift control, `DcBlocker`, `Agc`, `Deemphasis`, `Pll`, `BiquadCascade` (Butterworth sections) |
 | `demod` | `Demodulator` interface; `WfmDemod`, `StereoDecoder`, `NfmDemod`, `AmDemod`, `SsbDemod` (USB/LSB), `CwDemod`; `Squelch` |
 | `rds` | `RdsDemodulator` (57 kHz subcarrier → bits), `RdsDecoder` (block sync, groups → `RdsState`) |
-| `spectrum` | `SpectrumAnalyzer` (FFT frames, averaging, peak hold, display binning) |
+| `spectrum` | `SpectrumAnalyzer` (FFT frames, averaging, peak hold, display binning, noise-floor estimate) |
+| `sim` | Signal generators shared by the simulator and the tests: `MpxGenerator`, `FmModulator`, `RdsEncoder`, `RdsBaseband`, `SimBand` |
 | `sweep` | `SweepPlanner`, `SweepEngine`, `SweepResult`, CSV export |
 | `scan` | `Channel`, `ScanList`, `Scanner` state machine, `ActivityLog` |
 | `record` | `WavWriter` (crash-safe), `IqRecorder`, `AudioRecorder`, file naming and parsing |
-| `engine` | `Receiver` orchestrator, `AudioSink` interface, listener interfaces |
+| `engine` | `Receiver` orchestrator, `ReceiverChain` (channelizer → demodulator → squelch → audio output), `TuningPolicy`, `AudioSink` interface, listener interfaces |
 
 **`:app`** — Android: Compose UI, `RadioService` (foreground, `mediaPlayback` type), `DriverLauncher` (`iqsrc` hand-off), `AndroidAudioSink` (AudioTrack), `WaterfallView` (GLSurfaceView), persistence (Room + DataStore), recordings browser (FileProvider sharing).
 
@@ -65,32 +67,34 @@ Primary test device: Samsung Galaxy S24 Ultra (arm64, Android 14+) with an RTL-S
 ```kotlin
 interface IqSource {
     val info: SourceInfo                  // name, kind, capabilities, rates, gain model
+    val centerFrequencyHz: Long           // the tuner frequency in force
     fun open(listener: SourceListener)    // non-blocking; starts the source thread
     fun close()
-    fun setCenterFrequency(hz: Long)
-    fun setSampleRate(sps: Int)
+    fun setCenterFrequency(hz: Long): Int // returns a tune epoch: blocks with tuneEpoch ≥ it follow the change (§7.1)
+    fun setSampleRate(sps: Int): Int      // likewise
     fun setGain(gain: GainSetting)        // Auto, TunerTenthsDb, TunerIndex, RspLna, RspIfgr, RspAgc
     fun setPpm(ppm: Int)
     fun setOption(option: SourceOption)   // BiasT, DirectSampling, OffsetTuning, RspAntenna, RspNotches
+    fun recalibrate()                     // re-measures the retune latency where a source needs it (§7.1 step 3)
 }
 
 interface SourceListener {
     fun onStarted(info: SourceInfo)
-    fun onBlock(block: IqBlock)           // block carries seq, centerHz, sampleRate, interleaved floats
+    fun onBlock(block: IqBlock)           // block carries seq, tuneEpoch, centerHz, sampleRate, interleaved floats
     fun onError(error: SourceError)
     fun onStopped()
 }
 
 interface AudioSink {
     val sampleRate: Int                   // 48000
-    fun write(samples: FloatArray, frames: Int, channels: Int)
+    fun write(samples: FloatArray, frames: Int, channels: Int)  // DSP thread; never blocks, drops what does not fit
     fun fillLevel(): Float                // 0..1, drives drift compensation
 }
 ```
 
 ### 4.3 Threads and data flow
 
-1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments.
+1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, the `tuneEpoch` (§7.1), `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments. From Plan 3 on, a source delivers a block when it is full or holds about 20 ms of samples (sample rate / 50), whichever comes first, and the queue is sized by duration, so audio and spectrum frames stay smooth at low sample rates (a full block is 68 ms at 240 kS/s).
 2. **DSP thread:** for every block, the spectrum analyzer and the active demodulator chain run; audio goes to the `AudioSink`; the newest `SpectrumFrame` is published to a latest-value slot.
 3. **UI/GL thread:** reads the latest frame at vsync; pushes waterfall rows to the GPU.
 
@@ -179,14 +183,14 @@ Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectru
 
 - NCO (double-precision phase) shifts the VFO offset to 0 Hz.
 - Multistage polyphase FIR decimation (up to 3 stages, Kaiser-designed, ≥ 60 dB alias rejection), with the largest decimation first where the transition band is wide.
-- **WFM:** decimation D = max(1, floor(fs / 240 kHz)), giving 240–480 kHz (2.4 MS/s → 240 kHz); rates below 240 kHz run undecimated. Channel filter ±100 kHz by default.
+- **WFM:** decimation to 240–480 kHz: the largest D between fs / 480 kHz and fs / 240 kHz whose stages are all at most 8, or simply the largest D in that range when none qualifies (2.4 MS/s → 10, giving 240 kHz; 3.2 MS/s → 12); rates below 480 kHz run undecimated. Channel filter ±100 kHz by default, never wider than ±0.4 of the channel rate.
 - **Narrow modes:** integer decimation to 48–96 kHz, then the fractional resampler to exactly 48 kHz.
 - Mode filters: NFM 12.5 kHz (presets 6.25/25), AM 8 kHz (6/10), SSB 300–2,800 Hz, CW 500 Hz (250/1,000) around the pitch.
 
 ### 6.4 Demodulators
 
 - **WFM:** polar discriminator arg(x[n]·x*[n−1]), MPX scaled so ±75 kHz deviation = ±1.0. Mono: 15 kHz LPF → de-emphasis (50 µs default, 75 µs option) → 48 kHz.
-- **Stereo:** 19 kHz pilot PLL with lock detector; S = LPF₁₅ₖ(MPX · 2cos 2θ); L = M + S, R = M − S. M and S use identical filters so delays match. De-emphasis per channel; blend toward mono on weak pilot or noisy S.
+- **Stereo:** 19 kHz pilot PLL with lock detector; S = LPF₁₅ₖ(MPX · 2 sin 2ωt), the pilot being sin ωt (ITU-R BS.450); the PLL tracks the pilot as cos θ, so the code multiplies by −2 sin 2θ. L = M + S, R = M − S. M and S use identical filters so delays match. De-emphasis per channel. The output blends toward mono without a locked pilot and on a noisy S: the noise is measured in quadrature to the subcarrier (2 kHz wide, relative to full deviation), with full stereo up to −52 dB and mono from −40 dB.
 - **RDS:** mix MPX down by 57 kHz (3θ from the pilot PLL when locked, otherwise a free-running Costas loop) → 2.4 kHz LPF → decimate → Costas loop for residual phase → symbol timing recovery at 2,375 baud → biphase decode to 1,187.5 bit/s → differential decode → block sync.
   - Block check: generator g(x) = x¹⁰ + x⁸ + x⁷ + x⁵ + x⁴ + x³ + 1; offset words A `0x0FC`, B `0x198`, C `0x168`, C′ `0x350`, D `0x1B4`. Syndromes are derived from the offset words at start-up.
   - Groups decoded: PI, PTY, TP/TA, 0A/0B (programme service name), 2A/2B (radio text, A/B flag handling), 4A (clock time).
@@ -195,7 +199,7 @@ Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectru
 - **AM:** envelope detector, DC block, AGC.
 - **SSB:** shift the passband centre to 0 Hz (USB +1,550 Hz, LSB −1,550 Hz), complex LPF ±1,250 Hz, shift back, take the real part, AGC (attack 2 ms, decay 500 ms, hang 200 ms).
 - **CW:** as USB with the passband centred on the pitch (default 700 Hz).
-- **Squelch:** channel power in dBFS after the channel filter, 3 dB hysteresis. Auto squelch = noise floor (20th percentile of recent channel power) + 6 dB. Audio is gated with 5 ms ramps. Squelch state also drives the scanner.
+- **Squelch:** channel power in dBFS after the channel filter, 3 dB hysteresis. Auto squelch = noise floor + 6 dB; the floor is the 20th percentile of a slowly averaged spectrum over the usable part of the stream, scaled to the channel filter's noise bandwidth, so a station that never stops transmitting does not raise it. While the channel filter's noise bandwidth is more than half of the sample rate the floor is unknown and the auto squelch stays open. Audio is gated with 5 ms ramps. Squelch state also drives the scanner.
 
 ### 6.5 Audio output
 
@@ -217,9 +221,9 @@ Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectru
 
 Samples already inside the driver's USB buffers and the socket still belong to the old frequency when a retune command is sent. Using them puts signals at the wrong frequency (sweep "ghosts") and stops the scanner on the wrong channel. Every hardware retune therefore goes through `RetuneSync`:
 
-1. **Own queue:** blocks are tagged with `seq`; every block received before the retune is discarded.
+1. **Tune epochs:** `setCenterFrequency` and `setSampleRate` return the tune epoch their change will carry. The source stamps every block with `tuneEpoch` and raises it at the first block that belongs to the new setting: as steps 2 and 3 determine for hardware, at once for sources that need neither. The consumer discards blocks whose `tuneEpoch` is below the one it was given; `seq` only orders blocks and counts drops. If no such block arrives within 5 s of samples, the receiver warns and carries on with what the source delivers.
 2. **RTL sources (exact):** send frequency, then test mode on, then (5 ms later) test mode off. Commands execute in order, so the counter burst in the stream begins only after the retune has completed. Samples are discarded until the burst ends (detected as ≥ 64 consecutive incrementing bytes, then the first byte breaking the pattern), plus a 1 ms guard. A timeout of 1 s falls back to the measured latency.
-3. **Sources without test mode (rsp_tcp, legacy SDRplay driver):** at connect, a latency probe steps IF gain reduction by 20 dB and times the jump in noise power; settle = measured latency + 50 % margin, re-probed every 5 minutes and after reconnects.
+3. **Sources without test mode (rsp_tcp, legacy SDRplay driver):** at connect, a latency probe steps the gain from its highest to its lowest setting (on SDRplay, IF gain reduction from minimum to maximum) and times the fall in noise power; settle = measured latency + 50 % margin. Every new connection probes again. The sweep and the scanner re-probe before they start when the last measurement is older than 5 minutes; the listening receiver does not re-probe on a timer, because a probe silences the audio for one to three seconds and a stale latency costs it only a few milliseconds of the previous frequency.
 4. **NCO-only moves:** scanner channels inside the current tuner window change in DSP and need no synchronisation.
 
 ## 8. Scanner
@@ -268,7 +272,7 @@ Samples already inside the driver's USB buffers and the socket still belong to t
 | Network too slow for the rate | Step the sample rate down one level after sustained drops, with a notice (§5.3) |
 | Protocol error (bad header, short struct) | Close, show a readable message, log details |
 | DSP overload | Drop oldest blocks; overload badge when > 1 % of blocks dropped over 10 s, with a suggestion to lower the rate or FFT size |
-| Audio underrun | Drift-compensating resampler plus silence fill |
+| Audio underrun | Drift-compensating resampler (±500 ppm) keeps the buffer level; after an underrun the sink plays silence until its buffer is back at the target level |
 | Recording I/O error (disk full) | Stop recording, keep the file valid, notify |
 
 All errors reach the user as plain-language messages, with technical detail in logcat.
