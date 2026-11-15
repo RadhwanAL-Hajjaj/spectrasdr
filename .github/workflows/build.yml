@@ -101,9 +101,11 @@ jobs:
         with:
           api-level: 34
           arch: x86_64
+          profile: pixel_6
           disable-animations: true
           script: |
             gradle :app:connectedDebugAndroidTest --stacktrace
+            gradle :app:installDebug
             adb shell am start -W -n io.github.radhwanalhajjaj.spectrasdr/.MainActivity
             sleep 4
             adb exec-out screencap -p > screen-main.png
