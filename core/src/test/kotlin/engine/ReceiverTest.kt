@@ -233,6 +233,27 @@ class ReceiverTest {
     }
 
     @Test
+    fun theSpectrumKeepsItsSettingsWhenTheSourceTurnsOutToBeAnotherKind() {
+        // The analyzer is replaced when the usable fraction changes at the start; it must keep the user's
+        // averaging and peak decay. With a peak decay of 0 dB/s a held peak never falls.
+        val source = ScriptedSource(kind = SourceKind.RTL_TCP, startedKind = SourceKind.RSP_TCP)
+        val settings = ReceiverSettings(100_300_000, 240_000, Mode.NFM, averaging = 1.0, peakDecayDbPerSecond = 0.0)
+        val (r, events) = start(source, settings)
+        await("the first status") { r.status.tuned }
+        assertEquals(SourceKind.RSP_TCP, events.starts.single().first.kind)
+        val frame = SpectrumFrame(r.fftSize)
+        await("a spectrum frame") { r.spectrum(frame) }
+        val held = frame.peakDb.copyOf()
+        repeat(10) { n ->
+            await("spectrum frame ${n + 2}") { r.spectrum(frame) }
+            for (i in held.indices) {
+                assertTrue("the peak in bin $i fell from ${held[i]} to ${frame.peakDb[i]} dB", frame.peakDb[i] >= held[i])
+                held[i] = frame.peakDb[i]
+            }
+        }
+    }
+
+    @Test
     fun aSourceErrorIsReportedAndEndsTheSession() {
         val source = ScriptedSource()
         val (r, events) = start(source, ReceiverSettings(100_000_000, 240_000))

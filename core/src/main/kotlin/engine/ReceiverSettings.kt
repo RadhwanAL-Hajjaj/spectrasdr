@@ -94,7 +94,8 @@ data class ReceiverStatus(
  */
 interface ReceiverListener {
     /**
-     * The source has started streaming; called once per session, before any [onStatus] that reports
+     * The source has started streaming; called at most once per session (not at all when the source
+     * fails or the receiver is stopped before it starts), always before any [onStatus] that reports
      * a processed block. From here on [info] (kind, sample rates, gain model, options) is final for
      * the session.
      */

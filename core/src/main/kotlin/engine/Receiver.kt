@@ -31,8 +31,8 @@ import kotlin.math.roundToLong
  * request carry another rate (a refused first request, a source with a fixed rate), [settings]
  * follows them and the tuner is planned with the real rate.
  *
- * One receiver is one session: [start] it once and [stop] it once. The receiver opens and closes
- * the source.
+ * One receiver is one session: [start] it once; after [stop] it cannot be started again. The
+ * receiver opens and closes the source.
  */
 class Receiver(
     private val source: IqSource,
@@ -128,14 +128,15 @@ class Receiver(
     fun start() {
         check(started.compareAndSet(false, true)) { "a Receiver can be started once" }
         running = true
-        thread = Thread({ run() }, "receiver-dsp").apply {
-            isDaemon = true
-            start()
-        }
+        val t = Thread({ run() }, "receiver-dsp")
+        t.isDaemon = true
+        thread = t   // set before it runs, so a stop() right after start() finds it
+        t.start()
     }
 
     /**
-     * Stops receiving and closes the source. May be called from any thread, any number of times.
+     * Stops receiving and closes the source. May be called from any thread, any number of times;
+     * before [start] it does nothing and returns true.
      *
      * It asks the DSP thread to end and waits up to [timeoutMs] for it; true when the thread has
      * ended (the source is closed and [ReceiverListener.onStopped] has been called). When the thread
@@ -440,8 +441,12 @@ class Receiver(
         c.stereoEnabled = s.stereo
     }
 
+    /** An analyzer for [s], with its averaging and peak decay, so a replacement behaves like the one it replaces. */
     private fun newAnalyzer(s: ReceiverSettings) =
-        SpectrumAnalyzer(s.fftSize, s.window, s.framesPerSecond.toDouble(), usableFraction = usableFraction)
+        SpectrumAnalyzer(s.fftSize, s.window, s.framesPerSecond.toDouble(), usableFraction = usableFraction).also {
+            it.averaging = s.averaging
+            it.peakDecayDbPerSecond = s.peakDecayDbPerSecond
+        }
 
     companion object {
         private val NO_RDS = RdsState()
