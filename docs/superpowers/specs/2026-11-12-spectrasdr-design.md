@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-12
 - **Status:** Design approved in chat; this written spec awaits review
-- **Revised:** 2026-11-14 — §4.1, §4.2, §6.3, §6.4 and §7.1 aligned with the engine as built (Plans 1 and 2)
+- **Revised:** 2026-11-14 — §4.1, §4.2, §4.3, §6.3, §6.4 and §7.1 aligned with the engine as built (Plans 1 and 2)
 - **License:** GPL-3.0-or-later
 - **Working name:** SpectraSDR (renamable before first release)
 
@@ -67,6 +67,7 @@ Primary test device: Samsung Galaxy S24 Ultra (arm64, Android 14+) with an RTL-S
 ```kotlin
 interface IqSource {
     val info: SourceInfo                  // name, kind, capabilities, rates, gain model
+    val centerFrequencyHz: Long           // the tuner frequency in force
     fun open(listener: SourceListener)    // non-blocking; starts the source thread
     fun close()
     fun setCenterFrequency(hz: Long): Int // returns a tune epoch: blocks with tuneEpoch ≥ it follow the change (§7.1)
@@ -74,6 +75,7 @@ interface IqSource {
     fun setGain(gain: GainSetting)        // Auto, TunerTenthsDb, TunerIndex, RspLna, RspIfgr, RspAgc
     fun setPpm(ppm: Int)
     fun setOption(option: SourceOption)   // BiasT, DirectSampling, OffsetTuning, RspAntenna, RspNotches
+    fun recalibrate()                     // re-measures the retune latency where a source needs it (§7.1 step 3)
 }
 
 interface SourceListener {
@@ -92,7 +94,7 @@ interface AudioSink {
 
 ### 4.3 Threads and data flow
 
-1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments.
+1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, the `tuneEpoch` (§7.1), `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments.
 2. **DSP thread:** for every block, the spectrum analyzer and the active demodulator chain run; audio goes to the `AudioSink`; the newest `SpectrumFrame` is published to a latest-value slot.
 3. **UI/GL thread:** reads the latest frame at vsync; pushes waterfall rows to the GPU.
 
@@ -181,7 +183,7 @@ Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectru
 
 - NCO (double-precision phase) shifts the VFO offset to 0 Hz.
 - Multistage polyphase FIR decimation (up to 3 stages, Kaiser-designed, ≥ 60 dB alias rejection), with the largest decimation first where the transition band is wide.
-- **WFM:** decimation to 240–480 kHz: the largest D ≤ fs / 240 kHz whose stages are all at most 8 (2.4 MS/s → 10, giving 240 kHz; 3.2 MS/s → 12); rates below 480 kHz run undecimated. Channel filter ±100 kHz by default, never wider than ±0.4 of the channel rate.
+- **WFM:** decimation to 240–480 kHz: the largest D between fs / 480 kHz and fs / 240 kHz whose stages are all at most 8, or simply the largest D in that range when none qualifies (2.4 MS/s → 10, giving 240 kHz; 3.2 MS/s → 12); rates below 480 kHz run undecimated. Channel filter ±100 kHz by default, never wider than ±0.4 of the channel rate.
 - **Narrow modes:** integer decimation to 48–96 kHz, then the fractional resampler to exactly 48 kHz.
 - Mode filters: NFM 12.5 kHz (presets 6.25/25), AM 8 kHz (6/10), SSB 300–2,800 Hz, CW 500 Hz (250/1,000) around the pitch.
 
@@ -197,7 +199,7 @@ Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectru
 - **AM:** envelope detector, DC block, AGC.
 - **SSB:** shift the passband centre to 0 Hz (USB +1,550 Hz, LSB −1,550 Hz), complex LPF ±1,250 Hz, shift back, take the real part, AGC (attack 2 ms, decay 500 ms, hang 200 ms).
 - **CW:** as USB with the passband centred on the pitch (default 700 Hz).
-- **Squelch:** channel power in dBFS after the channel filter, 3 dB hysteresis. Auto squelch = noise floor + 6 dB; the floor is the 20th percentile of a slowly averaged spectrum over the usable part of the stream, scaled to the channel filter's noise bandwidth, so a station that never stops transmitting does not raise it. While the channel takes up more than half of the stream the floor is unknown and the auto squelch stays open. Audio is gated with 5 ms ramps. Squelch state also drives the scanner.
+- **Squelch:** channel power in dBFS after the channel filter, 3 dB hysteresis. Auto squelch = noise floor + 6 dB; the floor is the 20th percentile of a slowly averaged spectrum over the usable part of the stream, scaled to the channel filter's noise bandwidth, so a station that never stops transmitting does not raise it. While the channel filter's noise bandwidth is more than half of the sample rate the floor is unknown and the auto squelch stays open. Audio is gated with 5 ms ramps. Squelch state also drives the scanner.
 
 ### 6.5 Audio output
 
@@ -219,7 +221,7 @@ Estimated load for the heaviest v1 chain (WFM stereo + RDS + 4,096-point spectru
 
 Samples already inside the driver's USB buffers and the socket still belong to the old frequency when a retune command is sent. Using them puts signals at the wrong frequency (sweep "ghosts") and stops the scanner on the wrong channel. Every hardware retune therefore goes through `RetuneSync`:
 
-1. **Own queue:** blocks are tagged with `seq`; every block received before the retune is discarded.
+1. **Tune epochs:** `setCenterFrequency` and `setSampleRate` return the tune epoch their change will carry. The source stamps every block with `tuneEpoch` and raises it at the first block that belongs to the new setting: as steps 2 and 3 determine for hardware, at once for sources that need neither. The consumer discards blocks whose `tuneEpoch` is below the one it was given; `seq` only orders blocks and counts drops. If no such block arrives within 5 s of samples, the receiver warns and carries on with what the source delivers.
 2. **RTL sources (exact):** send frequency, then test mode on, then (5 ms later) test mode off. Commands execute in order, so the counter burst in the stream begins only after the retune has completed. Samples are discarded until the burst ends (detected as ≥ 64 consecutive incrementing bytes, then the first byte breaking the pattern), plus a 1 ms guard. A timeout of 1 s falls back to the measured latency.
 3. **Sources without test mode (rsp_tcp, legacy SDRplay driver):** at connect, a latency probe steps the gain from its highest to its lowest setting (on SDRplay, IF gain reduction from minimum to maximum) and times the fall in noise power; settle = measured latency + 50 % margin. Every new connection probes again. The sweep and the scanner re-probe before they start when the last measurement is older than 5 minutes; the listening receiver does not re-probe on a timer, because a probe silences the audio for one to three seconds and a stale latency costs it only a few milliseconds of the previous frequency.
 4. **NCO-only moves:** scanner channels inside the current tuner window change in DSP and need no synchronisation.
