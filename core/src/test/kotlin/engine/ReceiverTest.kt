@@ -263,6 +263,37 @@ class ReceiverTest {
     }
 
     @Test
+    fun stopClosesTheSourceItselfWhenTheDspThreadIsStuck() {
+        val writing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val stuck = object : AudioSink {
+            override val sampleRate = 48_000
+
+            override fun write(samples: FloatArray, frames: Int, channels: Int) {
+                writing.countDown()
+                release.await(20, SECONDS)
+            }
+
+            override fun fillLevel() = 0.5f
+        }
+        val source = ScriptedSource(listOf(station))
+        val events = Events()
+        val r = Receiver(source, stuck, ReceiverSettings(100_000_000, 240_000), events)
+        receiver = r
+        r.start()
+        assertTrue("the sink is written to", writing.await(20, SECONDS))
+        val began = System.nanoTime()
+        assertFalse("the DSP thread did not end", r.stop(200))
+        assertTrue("stop() waited about its time-out", (System.nanoTime() - began) / 1_000_000 in 200L..4_000L)
+        assertTrue("the source was closed by stop()", source.calls.contains("close"))
+        assertEquals(0, events.stops.get())
+        release.countDown()
+        assertTrue(events.stopped.await(20, SECONDS))
+        assertTrue("the DSP thread has ended", r.stop(5_000))
+        assertEquals(1, events.stops.get())
+    }
+
+    @Test
     fun aRateTooLowForTheModeStillShowsTheSpectrum() {
         val source = ScriptedSource(initialSampleRate = 48_000, canSetRate = false)
         val (r, events) = start(source, ReceiverSettings(100_000_000, 48_000))

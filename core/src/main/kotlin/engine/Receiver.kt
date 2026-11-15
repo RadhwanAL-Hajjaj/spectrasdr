@@ -102,7 +102,10 @@ class Receiver(
         return dst.size == a.fftSize && a.latest(dst)
     }
 
-    /** Opens the source and starts receiving. Problems are reported through the listener. */
+    /**
+     * Starts the DSP thread, which tunes and opens the source and receives. May be called from any
+     * thread, once per receiver; it returns at once. Problems are reported through the listener.
+     */
     fun start() {
         check(started.compareAndSet(false, true)) { "a Receiver can be started once" }
         running = true
@@ -112,11 +115,28 @@ class Receiver(
         }
     }
 
-    /** Stops receiving and closes the source; returns once the DSP thread has ended. */
-    fun stop() {
+    /**
+     * Stops receiving and closes the source. May be called from any thread, any number of times.
+     *
+     * It asks the DSP thread to end and waits up to [timeoutMs] for it; true when the thread has
+     * ended (the source is closed and [ReceiverListener.onStopped] has been called). When the thread
+     * is still busy (stuck in [AudioSink.write] or a listener callback), it closes the source itself
+     * from the calling thread and returns false; [ReceiverListener.onStopped] then comes when the DSP
+     * thread gets free, still exactly once. So it blocks for up to [timeoutMs] plus the time the
+     * source's own close takes: Android code must not call it on the main thread, and a listener
+     * callback must not wait for the thread that is calling stop().
+     *
+     * Called from the DSP thread itself (inside a listener callback) it only asks for the stop and
+     * returns true at once; the session ends when the callback has returned.
+     */
+    fun stop(timeoutMs: Long = STOP_TIMEOUT_MS): Boolean {
         running = false
         val t = thread
-        if (t != null && t !== Thread.currentThread()) t.join(STOP_TIMEOUT_MS)
+        if (t == null || t === Thread.currentThread()) return true
+        t.join(timeoutMs)
+        if (!t.isAlive) return true
+        runCatching { source.close() }   // the DSP thread closes it again when it gets free; sources allow that
+        return false
     }
 
     private val sourceListener = object : SourceListener {
