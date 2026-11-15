@@ -174,8 +174,8 @@ class Receiver(
 
     private fun process(block: IqBlock) {
         val began = System.nanoTime()
-        val s = settings
-        if (s !== applied) apply(s)
+        var s = settings
+        if (s !== applied) s = apply(s)   // what is in force afterwards: a refused frequency is already put back
         if (block.tuneEpoch < requiredEpoch) {
             staleSamples += block.length
             if (staleSamples < STALE_LIMIT_SECONDS * block.sampleRate) {
@@ -246,7 +246,8 @@ class Receiver(
     }
 
     /** Brings the analyzer, the chain's controls and the tuner in line with [s]. */
-    private fun apply(s: ReceiverSettings) {
+    private fun apply(s: ReceiverSettings): ReceiverSettings {
+        var inForce = s
         val old = applied
         applied = s
         if (old != null && (s.fftSize != old.fftSize || s.window != old.window || s.framesPerSecond != old.framesPerSecond)) {
@@ -278,7 +279,14 @@ class Receiver(
                 } catch (e: IllegalArgumentException) {
                     refusedCenterHz = center   // not asked again until the plan wants another one
                     listener.onWarning(e.message ?: "The source cannot tune to $center Hz")
-                    if (old != null) revertFrequency(s, old.frequencyHz)
+                    if (old != null) {
+                        // Put back, so the settings no longer hold the refused request and asking for it
+                        // again is a new request; only a refused first request has to be remembered.
+                        revertFrequency(s, old.frequencyHz)?.let {
+                            inForce = it
+                            refusedCenterHz = null
+                        }
+                    }
                 }
             }
         }
@@ -289,21 +297,22 @@ class Receiver(
                 status = waiting
                 listener.onStatus(waiting)
             }
-        } else if (old != null && s.frequencyHz != old.frequencyHz) {
+        } else if (old != null && inForce.frequencyHz != old.frequencyHz) {
             chain?.resetDecoders()   // another station inside the same stream
         }
+        return inForce
     }
 
     /** Puts the frequency in force back after the source refused [refused]'s, unless the user has asked for another since. */
-    private fun revertFrequency(refused: ReceiverSettings, frequencyHz: Long) {
+    private fun revertFrequency(refused: ReceiverSettings, frequencyHz: Long): ReceiverSettings? =
         synchronized(settingsLock) {
             val current = settings
-            if (current.frequencyHz != refused.frequencyHz) return
+            if (current.frequencyHz != refused.frequencyHz) return null
             val reverted = current.copy(frequencyHz = frequencyHz)
             if (current === refused) applied = reverted
             settings = reverted
+            reverted
         }
-    }
 
     /** The chain for blocks at [rate], rebuilt when the rate or a setting that shapes it changed. */
     private fun chainFor(rate: Int, s: ReceiverSettings): ReceiverChain? {

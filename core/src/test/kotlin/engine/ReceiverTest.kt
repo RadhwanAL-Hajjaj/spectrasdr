@@ -182,6 +182,31 @@ class ReceiverTest {
     }
 
     @Test
+    fun aRefusedFrequencyAskedForAgainIsRefusedAgainWithoutDisturbingReception() {
+        val source = ScriptedSource(listOf(station), maxFrequencyHz = 1_000_000_000)
+        val (r, events) = start(source, ReceiverSettings(100_000_000, 240_000))
+        await("the station name") { events.rds.lastOrNull()?.ps == "TEST FM " }
+        await("a full status") { r.status.rdsSynced }
+        val firstTuned = events.statuses.size
+        r.update { it.copy(frequencyHz = 2_000_000_000) }
+        await("the first warning") { events.warnings.size == 1 }
+        await("the first put-back") { r.settings.frequencyHz == 100_000_000L }
+        val blocks = r.status.blocks
+        await("blocks in between") { r.status.blocks > blocks + 5 }
+        r.update { it.copy(frequencyHz = 2_000_000_000) }
+        await("the second warning") { events.warnings.size == 2 }
+        await("the second put-back") { r.settings.frequencyHz == 100_000_000L }
+        assertEquals(2, source.calls.count { it == "freq 2000000000" })
+        val after = r.status.blocks
+        await("blocks afterwards") { r.status.blocks > after + 15 }
+        assertEquals(2, events.warnings.size)
+        assertEquals(100_000_000L, r.status.frequencyHz)
+        val listened = events.statuses.drop(firstTuned).map { it.frequencyHz }
+        assertTrue("statuses reported $listened", listened.all { it == 100_000_000L })
+        assertTrue("the station's data was cleared by a refusal", events.rds.drop(1).none { it.ps.isEmpty() })
+    }
+
+    @Test
     fun aSourceErrorIsReportedAndEndsTheSession() {
         val source = ScriptedSource()
         val (r, events) = start(source, ReceiverSettings(100_000_000, 240_000))
