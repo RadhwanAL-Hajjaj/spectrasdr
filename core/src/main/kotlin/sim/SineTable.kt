@@ -11,7 +11,7 @@ object SineTable {
 
     fun sin(turns: Double): Float {
         val x = (turns - floor(turns)) * SIZE
-        val i = x.toInt()
+        val i = minOf(x.toInt(), SIZE - 1)   // x is SIZE when a tiny negative phase rounds up to a full turn
         return table[i] + (table[i + 1] - table[i]) * (x - i).toFloat()
     }
 
