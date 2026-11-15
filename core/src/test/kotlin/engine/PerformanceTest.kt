@@ -62,7 +62,8 @@ class PerformanceTest {
         val station = SimStation.FmBroadcast(100_100_000, "ALLOC FM", "No garbage")
         for (mode in Mode.values()) {
             val band = SimBand(listOf(station), rate)
-            val chain = ReceiverChain(rate, mode, mode.defaultBandwidthHz, CountingSink())
+            val sink = CountingSink()
+            val chain = ReceiverChain(rate, mode, mode.defaultBandwidthHz, sink)
             chain.offsetHz = 100_000.0
             val analyzer = SpectrumAnalyzer(4_096)
             val block = FloatArray(2 * 16_384)
@@ -76,11 +77,23 @@ class PerformanceTest {
             repeat(200) { step() }            // 3.4 s: every buffer has its size and the RDS text is complete
             // Garbage made per block shows in every window. The JIT compiler, though, can charge a
             // one-off to this thread when it swaps running code, so the quietest window counts.
+            // The checks below are made outside the measured windows; the windows only read counters.
+            val framesBefore = sink.frames
+            val stereoBefore = chain.stereo
+            val psBefore = chain.rds?.state?.ps
             var quietest = Long.MAX_VALUE
             repeat(5) {
                 val before = bean.getThreadAllocatedBytes(thread)
                 repeat(50) { step() }
                 quietest = minOf(quietest, bean.getThreadAllocatedBytes(thread) - before)
+            }
+            // The measured path must have produced audio, or the figure above would be vacuous:
+            // 250 blocks of 16,384 samples at 960 kS/s are 4.27 s, i.e. 204,800 frames at 48 kHz.
+            val produced = sink.frames - framesBefore
+            assertTrue("$mode produced only $produced frames in the measured windows", produced >= 0.9 * 250 * 16_384 / rate * 48_000)
+            if (mode == Mode.WFM) {
+                assertTrue("WFM was not in stereo after the warm-up", stereoBefore)
+                assertEquals("ALLOC FM", psBefore)
             }
             assertTrue("$mode allocated $quietest bytes in 50 blocks", quietest < 500)
         }
