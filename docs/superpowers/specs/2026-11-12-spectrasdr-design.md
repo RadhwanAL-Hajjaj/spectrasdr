@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-12
 - **Status:** Design approved in chat; this written spec awaits review
-- **Revised:** 2026-11-14 — §4.1, §4.2, §4.3, §6.3, §6.4 and §7.1 aligned with the engine as built (Plans 1 and 2)
+- **Revised:** 2026-11-14 — §4.1, §4.2, §4.3, §6.3, §6.4, §7.1 and §11 aligned with the engine as built (Plans 1 and 2)
 - **License:** GPL-3.0-or-later
 - **Working name:** SpectraSDR (renamable before first release)
 
@@ -87,14 +87,14 @@ interface SourceListener {
 
 interface AudioSink {
     val sampleRate: Int                   // 48000
-    fun write(samples: FloatArray, frames: Int, channels: Int)
+    fun write(samples: FloatArray, frames: Int, channels: Int)  // DSP thread; never blocks, drops what does not fit
     fun fillLevel(): Float                // 0..1, drives drift compensation
 }
 ```
 
 ### 4.3 Threads and data flow
 
-1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, the `tuneEpoch` (§7.1), `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments.
+1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, the `tuneEpoch` (§7.1), `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments. From Plan 3 on, a source delivers a block when it is full or holds about 20 ms of samples (sample rate / 50), whichever comes first, and the queue is sized by duration, so audio and spectrum frames stay smooth at low sample rates (a full block is 68 ms at 240 kS/s).
 2. **DSP thread:** for every block, the spectrum analyzer and the active demodulator chain run; audio goes to the `AudioSink`; the newest `SpectrumFrame` is published to a latest-value slot.
 3. **UI/GL thread:** reads the latest frame at vsync; pushes waterfall rows to the GPU.
 
@@ -272,7 +272,7 @@ Samples already inside the driver's USB buffers and the socket still belong to t
 | Network too slow for the rate | Step the sample rate down one level after sustained drops, with a notice (§5.3) |
 | Protocol error (bad header, short struct) | Close, show a readable message, log details |
 | DSP overload | Drop oldest blocks; overload badge when > 1 % of blocks dropped over 10 s, with a suggestion to lower the rate or FFT size |
-| Audio underrun | Drift-compensating resampler plus silence fill |
+| Audio underrun | Drift-compensating resampler (±500 ppm) keeps the buffer level; after an underrun the sink plays silence until its buffer is back at the target level |
 | Recording I/O error (disk full) | Stop recording, keep the file valid, notify |
 
 All errors reach the user as plain-language messages, with technical detail in logcat.
