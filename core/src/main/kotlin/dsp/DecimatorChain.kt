@@ -2,10 +2,12 @@
 package io.github.radhwanalhajjaj.spectrasdr.core.dsp
 
 /** Cascade of [FirDecimator] stages (§6.3); the total factor is the product of the stage factors. */
-class DecimatorChain(private val stages: List<FirDecimator>, val inputRate: Double) {
+class DecimatorChain(stages: List<FirDecimator>, val inputRate: Double) {
+    // An array, so that the per-block loops below create no iterator (§4.4).
+    private val stages = stages.toTypedArray()
     val factor: Int = stages.fold(1) { acc, s -> acc * s.factor }
     val outputRate: Double = inputRate / factor
-    val stageFactors: List<Int> get() = stages.map { it.factor }
+    val stageFactors: List<Int> = stages.map { it.factor }
     private var scratchA = FloatArray(0)
     private var scratchB = FloatArray(0)
 
@@ -32,7 +34,9 @@ class DecimatorChain(private val stages: List<FirDecimator>, val inputRate: Doub
         return c
     }
 
-    fun reset() = stages.forEach { it.reset() }
+    fun reset() {
+        for (s in stages) s.reset()
+    }
 
     private fun scratch(idx: Int, complex: Int): FloatArray {
         val need = 2 * complex
@@ -46,7 +50,12 @@ class DecimatorChain(private val stages: List<FirDecimator>, val inputRate: Doub
     }
 
     companion object {
-        /** Splits [factor] into at most 3 stages, largest first; each stage ≤ 8 unless a prime factor is larger. */
+        /**
+         * Splits [factor] into at most 3 stages, largest first. Prime factors are combined into stages
+         * of at most 8 where that is possible: a prime factor above 8 is a stage of its own, and when
+         * more than three stages would result the smallest are merged, so 1024 becomes 16, 8, 8.
+         * Callers that can choose the factor should prefer one whose stages are all at most 8.
+         */
         fun planStages(factor: Int): List<Int> {
             require(factor >= 1) { "factor must be >= 1" }
             val primes = mutableListOf<Int>()
