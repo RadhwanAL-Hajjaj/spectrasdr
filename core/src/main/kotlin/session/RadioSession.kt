@@ -6,6 +6,7 @@ import io.github.radhwanalhajjaj.spectrasdr.core.engine.Receiver
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverListener
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverSettings
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverStatus
+import io.github.radhwanalhajjaj.spectrasdr.core.engine.ThreadHook
 import io.github.radhwanalhajjaj.spectrasdr.core.rds.RdsState
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqSource
@@ -39,6 +40,8 @@ class RadioSession(
     /** A connection that lasted this long counts as working again. */
     private val stableSeconds: Int = 10,
     private val nanoTime: () -> Long = System::nanoTime,
+    /** Told about each receiver's source and DSP threads, to raise their priority. */
+    private val threads: ThreadHook = ThreadHook { },
 ) : AutoCloseable {
     init {
         require(backoffSeconds.isNotEmpty() && backoffSeconds.all { it >= 0 }) { "back-off needs at least one delay, none negative" }
@@ -150,7 +153,7 @@ class RadioSession(
             publish(SessionState.Failed(spec, "Cannot use ${spec.label}: ${e.message}"))
             return
         }
-        val r = Receiver(src, sink, wanted, Events(gen, spec, src))
+        val r = Receiver(src, sink, wanted, Events(gen, spec, src), threads)
         synchronized(settingsLock) {
             source = src
             receiver = r

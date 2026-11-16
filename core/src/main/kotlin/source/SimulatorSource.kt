@@ -136,6 +136,9 @@ class SimulatorSource(
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+        } catch (e: RuntimeException) {
+            // A bug here or in the listener must end the stream with a report, not end the process.
+            listener.onError(SourceError.Io("The simulator stopped: ${e.message ?: e.javaClass.simpleName}"))
         } finally {
             running = false
             listener.onStopped()

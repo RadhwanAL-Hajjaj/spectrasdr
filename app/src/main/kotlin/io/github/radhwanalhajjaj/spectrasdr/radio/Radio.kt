@@ -2,6 +2,7 @@
 package io.github.radhwanalhajjaj.spectrasdr.radio
 
 import android.content.Context
+import android.os.Process
 import io.github.radhwanalhajjaj.spectrasdr.core.audio.AudioRing
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.Mode
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverSettings
@@ -28,7 +29,11 @@ class Radio(private val context: Context) : SessionListener {
 
     val ring = AudioRing()
     val player = AudioPlayer(ring)
-    private val session = RadioSession(ring, store.loadSettings(), this)
+    private val session = RadioSession(
+        ring, store.loadSettings(), this,
+        // The source and DSP threads feed the audio: they run at audio priority (§4.4).
+        threads = { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) },
+    )
 
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     private val _status = MutableStateFlow(ReceiverStatus())

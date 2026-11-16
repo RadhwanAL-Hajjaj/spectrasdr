@@ -131,6 +131,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
     private val lastOptions = ConcurrentHashMap<OptionKind, SourceOption>()
 
     private val opened = AtomicBoolean(false)
+    private val closing = AtomicBoolean(false)
 
     /** One client is one connection: open() works once; to reconnect, create a new client. */
     override fun open(listener: SourceListener) {
@@ -150,7 +151,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
      * commands). Then the socket is closed. Without it the socket is closed at once.
      */
     override fun close() {
-        if (closed) return
+        if (!closing.compareAndSet(false, true)) return   // two threads may close at once (Receiver.stop)
         closed = true
         val reader = readerThread?.takeIf { it !== Thread.currentThread() }
         var interrupted = false   // an interrupt never skips the cleanup; the flag is restored at the end
@@ -310,6 +311,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                 if (!closed) listener.onError(SourceError.ConnectFailed("Cannot connect to ${config.host}:${config.port}: ${e.message}"))
                 return
             }
+            if (closed) return   // close() ran before this thread had made its socket
             output = s.getOutputStream()
             s.soTimeout = config.connectTimeoutMs
             streaming = false
@@ -327,6 +329,7 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                 sync = chooseSync()
                 applyInitialSettings()
             }
+            if (closed) return
             listener.onStarted(currentInfo)
             s.soTimeout = config.readTimeoutMs
             streaming = true
@@ -345,6 +348,9 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
             }
         } catch (e: IOException) {
             if (!closed) listener.onError(SourceError.Io(e.message ?: "Connection error"))
+        } catch (e: RuntimeException) {
+            // A bug here or in the listener must end the stream with a report, not end the process.
+            if (!closed) listener.onError(SourceError.Io("Unexpected error: ${e.message ?: e.javaClass.simpleName}"))
         } finally {
             running = false
             runCatching { socket?.close() }

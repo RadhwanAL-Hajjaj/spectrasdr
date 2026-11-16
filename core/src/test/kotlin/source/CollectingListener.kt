@@ -7,7 +7,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicLong
 
 /** Test listener: copies blocks (up to [keepPerEpoch] samples per tune epoch) and records events. */
-class CollectingListener(private val keepPerEpoch: Long = 1_000_000) : SourceListener {
+open class CollectingListener(private val keepPerEpoch: Long = 1_000_000) : SourceListener {
     class Captured(val seq: Long, val epoch: Int, val centerHz: Long, val sampleRate: Int, val samples: FloatArray)
 
     val started = CountDownLatch(1)

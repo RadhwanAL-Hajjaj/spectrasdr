@@ -25,13 +25,12 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Checks the wrapper jar against Gradle's published checksums and caches Gradle's files.
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.6.1"
 
       - name: Build, test and lint
         shell: bash
-        run: gradle :core:test :app:assembleRelease :app:lintRelease --stacktrace 2>&1 | tee build.log
+        run: ./gradlew :core:test :app:assembleRelease :app:lintRelease --stacktrace 2>&1 | tee build.log
 
       - name: Point out what failed
         if: failure()
@@ -86,9 +85,8 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # Checks the wrapper jar against Gradle's published checksums and caches Gradle's files.
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.6.1"
 
       - name: Enable KVM
         run: |
@@ -105,7 +103,7 @@ jobs:
           disable-animations: true
           script: |
             adb logcat -c
-            gradle :app:connectedAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -s SPECTRA:W AndroidRuntime:E | tail -n 60; grep -h -A 14 "<failure" app/build/outputs/androidTest-results/connected/*/*.xml | cut -c1-400 | head -n 90; exit $code
+            ./gradlew :app:connectedAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -s SPECTRA:W AndroidRuntime:E | tail -n 60; grep -h -A 14 "<failure" app/build/outputs/androidTest-results/connected/*/*.xml | cut -c1-400 | head -n 90; exit $code
 
       - name: Publish the screenshots
         if: always() && github.event_name == 'push'

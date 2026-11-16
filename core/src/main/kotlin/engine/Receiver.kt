@@ -40,6 +40,7 @@ class Receiver(
     private val sink: AudioSink,
     initial: ReceiverSettings,
     private val listener: ReceiverListener,
+    private val threads: ThreadHook = ThreadHook { },
 ) {
     /**
      * The settings in force or about to be. Any thread may read it. The receiver itself replaces
@@ -162,6 +163,7 @@ class Receiver(
 
     private val sourceListener = object : SourceListener {
         override fun onStarted(info: SourceInfo) {
+            runCatching { threads.started(ThreadRole.SOURCE) }
             startedInfo = info
         }
 
@@ -189,6 +191,7 @@ class Receiver(
 
     private fun run() {
         try {
+            runCatching { threads.started(ThreadRole.DSP) }
             apply(settings)   // tunes the source before it is opened, so its first blocks are already right
             if (running) source.open(sourceListener)
             while (running) {
