@@ -2,6 +2,7 @@
 package io.github.radhwanalhajjaj.spectrasdr.core.source.rtltcp
 
 import io.github.radhwanalhajjaj.spectrasdr.core.source.BlockPool
+import io.github.radhwanalhajjaj.spectrasdr.core.source.BlockSizing
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainModel
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqBlock
@@ -481,10 +482,11 @@ class RtlTcpClient(private val config: RtlTcpConfig) : IqSource {
                         it.tuneEpoch = activeEpoch
                         block = it
                     }
-                    val got = SampleConverter.convert(format, buf, pos, whole - pos, b.samples, b.length, b.capacity - b.length)
+                    val fill = BlockSizing.samplesPerBlock(b.sampleRate, b.capacity)
+                    val got = SampleConverter.convert(format, buf, pos, whole - pos, b.samples, b.length, fill - b.length)
                     b.length += got
                     pos += got * bps
-                    if (b.length == b.capacity) {
+                    if (b.length >= fill) {
                         block = null
                         deliver(listener, b)
                     }

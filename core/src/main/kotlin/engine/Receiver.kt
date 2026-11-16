@@ -4,6 +4,7 @@ package io.github.radhwanalhajjaj.spectrasdr.core.engine
 import io.github.radhwanalhajjaj.spectrasdr.core.dsp.DcBlocker
 import io.github.radhwanalhajjaj.spectrasdr.core.rds.RdsState
 import io.github.radhwanalhajjaj.spectrasdr.core.source.BlockQueue
+import io.github.radhwanalhajjaj.spectrasdr.core.source.BlockSizing
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqBlock
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqSource
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
@@ -172,7 +173,7 @@ class Receiver(
             if (block.sampleRate != queuedRate || block.capacity != queuedBlockSize) {
                 queuedRate = block.sampleRate
                 queuedBlockSize = block.capacity
-                queue.capacity = queueCapacity(block.sampleRate, block.capacity)
+                queue.capacity = queueCapacity(block.sampleRate, BlockSizing.samplesPerBlock(block.sampleRate, block.capacity))
             }
             queue.offer(block)
         }
