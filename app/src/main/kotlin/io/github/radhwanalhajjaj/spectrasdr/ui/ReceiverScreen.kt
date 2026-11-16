@@ -58,6 +58,7 @@ import io.github.radhwanalhajjaj.spectrasdr.core.session.SourceSpec
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainModel
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
 import io.github.radhwanalhajjaj.spectrasdr.radio.Radio
+import io.github.radhwanalhajjaj.spectrasdr.radio.RspGain
 import kotlin.math.roundToInt
 
 /** Tuning step when tapping the spectrum, per mode. */
@@ -76,6 +77,8 @@ fun ReceiverScreen(radio: Radio) {
     val rds by radio.rds.collectAsState()
     val settings by radio.settings.collectAsState()
     val gain by radio.gain.collectAsState()
+    val rspGain by radio.rspGain.collectAsState()
+    var typing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     var choosing by remember { mutableStateOf(false) }
@@ -124,6 +127,7 @@ fun ReceiverScreen(radio: Radio) {
             FrequencyReadout(
                 frequencyHz = settings.frequencyHz,
                 onChange = { hz -> radio.update { it.copy(frequencyHz = hz) } },
+                onType = { typing = true },
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
             )
             ModeRow(settings, onMode = radio::setMode, onBandwidth = { bw -> radio.update { it.copy(bandwidthHz = bw) } })
@@ -136,7 +140,7 @@ fun ReceiverScreen(radio: Radio) {
             )
             Meter(status)
             RdsStrip(rds, status)
-            Levels(settings, state, gain, radio)
+            Levels(settings, state, gain, rspGain, radio)
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
                 horizontalArrangement = Arrangement.Center,
@@ -150,6 +154,16 @@ fun ReceiverScreen(radio: Radio) {
         }
     }
 
+    if (typing) {
+        FrequencyDialog(
+            current = settings.frequencyHz,
+            onDismiss = { typing = false },
+            onDone = { hz ->
+                typing = false
+                radio.update { it.copy(frequencyHz = hz) }
+            },
+        )
+    }
     if (choosing) {
         SourceDialog(
             last = radio.lastSpec,
@@ -290,7 +304,7 @@ private fun RdsStrip(rds: RdsState, status: ReceiverStatus) {
 }
 
 @Composable
-private fun Levels(settings: ReceiverSettings, state: SessionState, gain: GainSetting, radio: Radio) {
+private fun Levels(settings: ReceiverSettings, state: SessionState, gain: GainSetting, rspGain: RspGain, radio: Radio) {
     LabelledSlider("Volume", "${(settings.volume * 100).roundToInt()} %", settings.volume, 0f..1f) { v ->
         radio.update { it.copy(volume = v) }
     }
@@ -321,6 +335,40 @@ private fun Levels(settings: ReceiverSettings, state: SessionState, gain: GainSe
                 "Gain", "${FrequencyText.fixed(model.tenthsDb[index] / 10.0, 1)} dB", index.toFloat(), 0f..model.tenthsDb.lastIndex.toFloat(),
                 steps = (model.tenthsDb.size - 2).coerceAtLeast(0),
             ) { v -> radio.setGain(GainSetting.TunerIndex(v.roundToInt())) }
+        }
+    }
+    if (model is GainModel.Rsp) {
+        if (model.agc) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Automatic gain control", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(checked = rspGain.agc, onCheckedChange = { on -> radio.setRspGain(rspGain.copy(agc = on)) })
+            }
+        }
+        if (model.lnaStates > 1) {
+            LabelledSlider(
+                "LNA state", "${rspGain.lnaState}", rspGain.lnaState.toFloat(), 0f..(model.lnaStates - 1).toFloat(),
+                steps = (model.lnaStates - 2).coerceAtLeast(0),
+            ) { v -> radio.setRspGain(rspGain.copy(lnaState = v.roundToInt())) }
+        }
+        if (!rspGain.agc || !model.agc) {
+            val reduction = rspGain.ifGainReductionDb.coerceIn(model.ifgrMin, model.ifgrMax)
+            LabelledSlider("IF gain reduction", "$reduction dB", reduction.toFloat(), model.ifgrMin.toFloat()..model.ifgrMax.toFloat()) { v ->
+                radio.setRspGain(rspGain.copy(ifGainReductionDb = v.roundToInt()))
+            }
+        }
+    }
+    val rates = (state as? SessionState.Running)?.info?.sampleRates.orEmpty()
+    if (rates.size > 1) {
+        Text("Sample rate", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+        Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (rate in rates) {
+                FilterChip(
+                    selected = settings.sampleRate == rate,
+                    onClick = { radio.setSampleRate(rate) },
+                    label = { Text("${FrequencyText.fixed(rate / 1e6, 2).trimEnd('0').trimEnd('.')} MS/s") },
+                    modifier = Modifier.testTag("rate-$rate"),
+                )
+            }
         }
     }
 }

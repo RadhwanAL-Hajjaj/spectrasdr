@@ -31,7 +31,7 @@ jobs:
 
       - name: Build, test and lint
         shell: bash
-        run: gradle :core:test :app:assembleDebug :app:lintDebug --stacktrace 2>&1 | tee build.log
+        run: gradle :core:test :app:assembleRelease :app:lintRelease --stacktrace 2>&1 | tee build.log
 
       - name: Point out what failed
         if: failure()
@@ -50,15 +50,15 @@ jobs:
           name: reports
           path: |
             build.log
-            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-release.html
             core/build/reports/tests/test
           if-no-files-found: ignore
 
       - name: Keep the APK
         uses: actions/upload-artifact@v4
         with:
-          name: spectrasdr-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: spectrasdr-apk
+          path: app/build/outputs/apk/release/app-release.apk
 
       - name: Publish the test build
         if: github.event_name == 'push'
@@ -66,8 +66,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk spectrasdr-test.apk
-          notes="Automatic test build from branch \`${{ github.ref_name }}\`, commit ${{ github.sha }}, $(date -u '+%Y-%m-%d %H:%M UTC'). Not a release: it can be incomplete or broken. Signed with the project's public debug key."
+          cp app/build/outputs/apk/release/app-release.apk spectrasdr-test.apk
+          notes="Automatic test build from branch \`${{ github.ref_name }}\`, commit ${{ github.sha }}, $(date -u '+%Y-%m-%d %H:%M UTC'). Not a release: it can be incomplete or broken. Signed with the project's public test key."
           if gh release view test-build >/dev/null 2>&1; then
             gh release upload test-build spectrasdr-test.apk --clobber
             gh release edit test-build --notes "$notes"
@@ -105,7 +105,7 @@ jobs:
           disable-animations: true
           script: |
             adb logcat -c
-            gradle :app:connectedDebugAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -t 600 '*:W' | grep -E "spectrasdr|AndroidRuntime|TestRunner|AudioTrack|SPECTRA" | tail -n 150; exit $code
+            gradle :app:connectedAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -t 600 '*:W' | grep -E "spectrasdr|AndroidRuntime|TestRunner|AudioTrack|SPECTRA" | tail -n 150; exit $code
 
       - name: Publish the screenshots
         if: always() && github.event_name == 'push'

@@ -108,7 +108,9 @@ class RadioSessionTest {
     @Test
     fun aLostNetworkSourceIsReconnectedWithTheSameSettingsAndGain() {
         val s = session(backoff = listOf(0))
-        s.setGain(GainSetting.TunerTenthsDb(297))
+        s.setGain(GainSetting.TunerTenthsDb(100))
+        s.setGain(GainSetting.TunerTenthsDb(297))          // replaces the one before
+        s.setGain(GainSetting.RspLna(3))                   // a separate control: kept as well
         s.start(network)
         awaitRunning()
         s.update { it.copy(frequencyHz = 145_500_000) }
@@ -118,7 +120,8 @@ class RadioSessionTest {
         assertEquals(1, waiting.attempt)
         assertEquals("The connection to radio.example:1234 was lost.", waiting.reason)
         assertEquals(2, made.size)
-        assertEquals(listOf<GainSetting>(GainSetting.TunerTenthsDb(297)), made[1].gains)
+        assertEquals(setOf<GainSetting>(GainSetting.TunerTenthsDb(297), GainSetting.RspLna(3)), made[1].gains.toSet())
+        assertEquals(2, made[1].gains.size)
         assertEquals(145_500_000, s.settings.frequencyHz)
     }
 

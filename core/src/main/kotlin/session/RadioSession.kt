@@ -14,6 +14,7 @@ import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceInfo
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceOption
 import io.github.radhwanalhajjaj.spectrasdr.core.spectrum.SpectrumFrame
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -51,10 +52,11 @@ class RadioSession(
     @Volatile private var source: IqSource? = null
     @Volatile private var generation = 0
 
-    // What the user set on the source; put back after every (re)connection.
-    @Volatile private var gain: GainSetting? = null
+    // What the user set on the source; put back after every (re)connection. Gains are kept one
+    // per control: the tuner's gain, and for an RSP its LNA state, IF gain reduction and AGC.
+    private val gains = ConcurrentHashMap<String, GainSetting>()
     @Volatile private var ppm: Int? = null
-    private val options = java.util.concurrent.ConcurrentHashMap<OptionKind, SourceOption>()
+    private val options = ConcurrentHashMap<OptionKind, SourceOption>()
 
     // Session thread only.
     private var spec: SourceSpec? = null
@@ -113,7 +115,7 @@ class RadioSession(
     }
 
     fun setGain(gain: GainSetting) {
-        this.gain = gain
+        gains[controlOf(gain)] = gain
         runCatching { source?.setGain(gain) }
     }
 
@@ -178,7 +180,7 @@ class RadioSession(
 
     private fun started(spec: SourceSpec, src: IqSource, info: SourceInfo) {
         runningSinceNs = nanoTime()
-        gain?.let { g -> runCatching { src.setGain(g) } }
+        for (g in gains.values) runCatching { src.setGain(g) }
         ppm?.let { p -> runCatching { src.setPpm(p) } }
         for (o in options.values) if (o.kind in info.options) runCatching { src.setOption(o) }
         publish(SessionState.Running(spec, info))
@@ -210,6 +212,13 @@ class RadioSession(
         attempt++
         publish(SessionState.Waiting(spec, attempt, seconds, reason))
         retry = executor.schedule({ retry = null; connect() }, seconds.toLong(), TimeUnit.SECONDS)
+    }
+
+    private fun controlOf(gain: GainSetting): String = when (gain) {
+        is GainSetting.Auto, is GainSetting.TunerTenthsDb, is GainSetting.TunerIndex -> "tuner"
+        is GainSetting.RspLna -> "lna"
+        is GainSetting.RspIfgr -> "ifgr"
+        is GainSetting.RspAgc -> "agc"
     }
 
     private fun publish(next: SessionState) {

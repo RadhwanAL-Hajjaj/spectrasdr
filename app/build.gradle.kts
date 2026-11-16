@@ -18,14 +18,27 @@ android {
     }
 
     signingConfigs {
-        // A fixed, public debug key, so that every test build installs over the previous one.
-        getByName("debug") {
+        // A fixed, public key for test builds, so that each one installs over the previous one.
+        create("test") {
             storeFile = rootProject.file("debug.keystore")
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
     }
+
+    buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("test")
+        }
+        // The build people install and the emulator tests run: not debuggable, because a debuggable
+        // app runs its signal processing several times slower.
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("test")
+        }
+    }
+    testBuildType = "release"
 
     buildFeatures {
         compose = true
@@ -50,5 +63,4 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.rules)
-    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

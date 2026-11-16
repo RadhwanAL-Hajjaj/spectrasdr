@@ -38,6 +38,14 @@ class SettingsStore(context: Context) {
             .apply()
     }
 
+    /** The sample rate used last with this kind of source. */
+    fun loadRate(spec: SourceSpec): Int =
+        if (spec is SourceSpec.Simulator) prefs.getInt("rate.simulator", Radio.SIMULATOR_RATE) else prefs.getInt("rate.radio", Radio.DEFAULT_RATE)
+
+    fun saveRate(spec: SourceSpec, rate: Int) {
+        prefs.edit().putInt(if (spec is SourceSpec.Simulator) "rate.simulator" else "rate.radio", rate).apply()
+    }
+
     fun loadSpec(): SourceSpec = when (prefs.getString("source", "simulator")) {
         "network" -> runCatching {
             SourceSpec.Network(prefs.getString("host", "")!!, prefs.getInt("port", 1234))

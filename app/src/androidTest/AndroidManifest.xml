@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The stand-in driver app serves samples from the test package's own process. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application>
+        <!-- Stands in for an SDR driver app: answers iqsrc:// like one (§5.1). -->
+        <activity
+            android:name="io.github.radhwanalhajjaj.spectrasdr.FakeDriverActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="iqsrc" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

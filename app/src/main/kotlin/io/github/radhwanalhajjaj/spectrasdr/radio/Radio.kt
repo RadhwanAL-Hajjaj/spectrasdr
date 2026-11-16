@@ -35,13 +35,18 @@ class Radio(private val context: Context) : SessionListener {
     private val _rds = MutableStateFlow(RdsState())
     private val _settings = MutableStateFlow(session.settings)
     private val _gain = MutableStateFlow<GainSetting>(GainSetting.Auto)
+    private val _rspGain = MutableStateFlow(RspGain())
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     val state: StateFlow<SessionState> get() = _state
     val status: StateFlow<ReceiverStatus> get() = _status
     val rds: StateFlow<RdsState> get() = _rds
     val settings: StateFlow<ReceiverSettings> get() = _settings
+    /** The tuner gain of an RTL-SDR: automatic or one of its steps. */
     val gain: StateFlow<GainSetting> get() = _gain
+
+    /** The gain controls of an SDRplay receiver. */
+    val rspGain: StateFlow<RspGain> get() = _rspGain
     val messages: SharedFlow<String> get() = _messages
 
     /** The source used last, to offer it again. */
@@ -53,9 +58,7 @@ class Radio(private val context: Context) : SessionListener {
     fun start(spec: SourceSpec) {
         lastSpec = spec
         store.saveSpec(spec)
-        // The simulator makes its band in real time; a modest rate keeps it light on slow devices.
-        val rate = if (spec is SourceSpec.Simulator) SIMULATOR_RATE else DEFAULT_RATE
-        update { it.copy(sampleRate = rate) }
+        update { it.copy(sampleRate = store.loadRate(spec)) }
         RadioService.start(context)
         player.start()
         session.start(spec)
@@ -81,6 +84,20 @@ class Radio(private val context: Context) : SessionListener {
     fun setGain(gain: GainSetting) {
         _gain.value = gain
         session.setGain(gain)
+    }
+
+    fun setRspGain(gain: RspGain) {
+        val before = _rspGain.value
+        _rspGain.value = gain
+        if (gain.agc != before.agc) session.setGain(GainSetting.RspAgc(gain.agc))
+        if (gain.lnaState != before.lnaState) session.setGain(GainSetting.RspLna(gain.lnaState))
+        if (gain.ifGainReductionDb != before.ifGainReductionDb) session.setGain(GainSetting.RspIfgr(gain.ifGainReductionDb))
+    }
+
+    /** Changes the sample rate and remembers it for this kind of source. */
+    fun setSampleRate(rate: Int) {
+        update { it.copy(sampleRate = rate) }
+        store.saveRate(lastSpec, rate)
     }
 
     fun setPaused(paused: Boolean) = player.setPaused(paused)
@@ -119,6 +136,11 @@ class Radio(private val context: Context) : SessionListener {
 
     companion object {
         const val DEFAULT_RATE = 2_400_000
+
+        /** The simulator makes its band in real time; a modest rate keeps it light on slow devices. */
         const val SIMULATOR_RATE = 960_000
     }
 }
+
+/** SDRplay gain: automatic gain control, the LNA state (0 = most gain) and the IF gain reduction in dB. */
+data class RspGain(val agc: Boolean = true, val lnaState: Int = 0, val ifGainReductionDb: Int = 40)
