@@ -2,4 +2,9 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 <resources>
     <string name="app_name">SpectraSDR</string>
+    <string name="channel_listening">Listening</string>
+    <string name="action_stop">Stop</string>
+    <string name="state_starting">Starting…</string>
+    <string name="state_connecting">Connecting to %1$s…</string>
+    <string name="state_waiting">Connection lost. Trying again in %1$d s.</string>
 </resources>

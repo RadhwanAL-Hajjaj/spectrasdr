@@ -2,6 +2,7 @@
 package io.github.radhwanalhajjaj.spectrasdr.core.display
 
 import java.math.BigDecimal
+import java.util.Locale
 
 /** Frequencies as people read and type them. */
 object FrequencyText {
@@ -25,8 +26,11 @@ object FrequencyText {
         val mhz = v / 1_000_000
         val khz = v / 1_000 % 1_000
         val rest = v % 1_000
-        return "%d.%03d %03d MHz".format(mhz, khz, rest)
+        return String.format(Locale.ROOT, "%d.%03d %03d MHz", mhz, khz, rest)
     }
+
+    /** [value] with [decimals] places, always with Western digits and a point, whatever the device's language. */
+    fun fixed(value: Double, decimals: Int): String = String.format(Locale.ROOT, "%.${decimals}f", value)
 
     /** A short form for labels and the notification: "100.3 MHz", "145.5125 MHz", "7.1 MHz". */
     fun short(hz: Long): String {

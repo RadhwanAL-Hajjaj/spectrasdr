@@ -104,17 +104,14 @@ jobs:
           profile: pixel_6
           disable-animations: true
           script: |
-            gradle :app:connectedDebugAndroidTest --stacktrace
-            gradle :app:installDebug
-            adb shell am start -W -n io.github.radhwanalhajjaj.spectrasdr/.MainActivity
-            sleep 4
-            adb exec-out screencap -p > screen-main.png
+            adb logcat -c
+            gradle :app:connectedDebugAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -t 600 '*:W' | grep -E "spectrasdr|AndroidRuntime|TestRunner|AudioTrack|SPECTRA" | tail -n 150; exit $code
 
       - name: Publish the screenshots
-        if: github.event_name == 'push'
+        if: always() && github.event_name == 'push'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ls -la screen-*.png
-          gh release upload test-build screen-*.png --clobber
+          ls -la shots/ || exit 0
+          gh release upload test-build shots/*.png --clobber
