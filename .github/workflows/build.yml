@@ -105,7 +105,7 @@ jobs:
           disable-animations: true
           script: |
             adb logcat -c
-            gradle :app:connectedAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -t 600 '*:W' | grep -E "spectrasdr|AndroidRuntime|TestRunner|AudioTrack|SPECTRA" | tail -n 150; exit $code
+            gradle :app:connectedAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -s SPECTRA:W AndroidRuntime:E | tail -n 60; grep -h -A 14 "<failure" app/build/outputs/androidTest-results/connected/*/*.xml | cut -c1-400 | head -n 90; exit $code
 
       - name: Publish the screenshots
         if: always() && github.event_name == 'push'
