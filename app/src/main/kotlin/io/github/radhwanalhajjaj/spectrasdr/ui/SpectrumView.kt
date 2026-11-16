@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package io.github.radhwanalhajjaj.spectrasdr.ui
 
+import android.view.Choreographer
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -80,11 +80,18 @@ fun SpectrumView(
     val text = rememberTextMeasurer()
     val label = TextStyle(color = Instrument.dim, fontSize = 10.sp)
 
-    LaunchedEffect(radio) {
-        while (true) {
-            withFrameNanos { }
-            if (data.poll(radio)) drawn++
+    // Polled from the display's frame callback, not from a Compose coroutine: an endless frame
+    // loop would keep Compose from ever being idle (and its tests from ever proceeding).
+    DisposableEffect(radio) {
+        val choreographer = Choreographer.getInstance()
+        val callback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (data.poll(radio)) drawn++
+                choreographer.postFrameCallback(this)
+            }
         }
+        choreographer.postFrameCallback(callback)
+        onDispose { choreographer.removeFrameCallback(callback) }
     }
 
     Canvas(
