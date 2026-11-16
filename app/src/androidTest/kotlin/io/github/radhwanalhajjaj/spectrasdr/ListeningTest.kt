@@ -118,6 +118,20 @@ class ListeningTest {
     }
 
     @Test
+    fun quickStartsAndStopsLeaveTheAppRunning() {
+        // Stopping the foreground service before it has become one ends the whole app.
+        repeat(6) {
+            rule.runOnUiThread { radio.start(SourceSpec.Simulator) }
+            if (it % 2 == 0) Thread.sleep(40L * it)
+            rule.runOnUiThread { radio.stop() }
+        }
+        rule.runOnUiThread { radio.start(SourceSpec.Simulator) }
+        rule.waitUntil(60_000) { tunedAndRunning() }
+        rule.runOnUiThread { radio.stop() }
+        rule.waitUntil(20_000) { radio.state.value == SessionState.Idle && !radio.serviceWanted.value }
+    }
+
+    @Test
     fun theDongleIsStartedThroughADriverApp() {
         rule.onNodeWithTag("listen").performScrollTo().performClick()
         rule.onNodeWithTag("source-dongle").performClick()

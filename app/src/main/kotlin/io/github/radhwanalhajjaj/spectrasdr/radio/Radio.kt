@@ -41,6 +41,9 @@ class Radio(private val context: Context) : SessionListener {
     private val _settings = MutableStateFlow(session.settings)
     private val _gain = MutableStateFlow<GainSetting>(GainSetting.Auto)
     private val _rspGain = MutableStateFlow(RspGain())
+    private val _serviceWanted = MutableStateFlow(false)
+    private val serviceLock = Any()
+    private var startsPending = 0   // start() calls the session has not begun yet; guarded by serviceLock
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     val state: StateFlow<SessionState> get() = _state
@@ -54,6 +57,13 @@ class Radio(private val context: Context) : SessionListener {
     val rspGain: StateFlow<RspGain> get() = _rspGain
     val messages: SharedFlow<String> get() = _messages
 
+    /**
+     * Whether [RadioService] should be running: from [start] until the session it started has ended.
+     * The service follows this instead of the session's state, because a session that is still being
+     * stopped reports "idle" after the next one was already asked for.
+     */
+    val serviceWanted: StateFlow<Boolean> get() = _serviceWanted
+
     /** The source used last, to offer it again. */
     var lastSpec: SourceSpec = store.loadSpec()
         private set
@@ -64,6 +74,10 @@ class Radio(private val context: Context) : SessionListener {
         lastSpec = spec
         store.saveSpec(spec)
         update { it.copy(sampleRate = store.loadRate(spec)) }
+        synchronized(serviceLock) {
+            startsPending++
+            _serviceWanted.value = true
+        }
         RadioService.start(context)
         player.start()
         session.start(spec)
@@ -111,8 +125,14 @@ class Radio(private val context: Context) : SessionListener {
 
     override fun onState(state: SessionState) {
         _state.value = state
-        if (state is SessionState.Idle || state is SessionState.Failed) {
-            player.stop()
+        val ended = state is SessionState.Idle || state is SessionState.Failed
+        synchronized(serviceLock) {
+            // Each start() shows up once as a first connection attempt.
+            if (state is SessionState.Connecting && state.attempt == 0 && startsPending > 0) startsPending--
+            if (ended && startsPending == 0) _serviceWanted.value = false
+        }
+        if (ended) {
+            if (!_serviceWanted.value) player.stop()
             _status.value = ReceiverStatus()
             _rds.value = RdsState()
         }

@@ -40,6 +40,7 @@ class RadioService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var focusRequest: AudioFocusRequest? = null
+    private var inForeground = false   // main thread only
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
@@ -62,14 +63,16 @@ class RadioService : Service() {
             combine(radio.state, radio.settings, radio.rds) { state, settings, rds ->
                 Triple(state, "${FrequencyText.short(settings.frequencyHz)} ${settings.mode.name}", rds.ps.trim())
             }.distinctUntilChanged().collect { (state, tuning, station) ->
-                when (state) {
-                    is SessionState.Idle, is SessionState.Failed -> finish()
-                    else -> {
-                        holdLocks(state)
-                        manager.notify(NOTIFICATION, notification(tuning, describe(state, station)))
-                    }
+                if (inForeground && state !is SessionState.Idle && state !is SessionState.Failed) {
+                    holdLocks(state)
+                    manager.notify(NOTIFICATION, notification(tuning, describe(state, station)))
                 }
             }
+        }
+        // Ends itself, and only after it has become a foreground service: stopping one that was asked
+        // for with startForegroundService() before it called startForeground() ends the whole app.
+        scope.launch {
+            radio.serviceWanted.collect { wanted -> if (!wanted && inForeground) finish() }
         }
     }
 
@@ -84,7 +87,8 @@ class RadioService : Service() {
         } else {
             startForeground(NOTIFICATION, first)
         }
-        requestFocus()
+        inForeground = true
+        if (radio.serviceWanted.value) requestFocus() else finish()
         return START_NOT_STICKY
     }
 
@@ -96,6 +100,7 @@ class RadioService : Service() {
     }
 
     private fun finish() {
+        inForeground = false
         releaseLocks()
         abandonFocus()
         stopForeground(STOP_FOREGROUND_REMOVE)

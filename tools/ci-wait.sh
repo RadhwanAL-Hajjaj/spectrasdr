@@ -42,7 +42,7 @@ for run in $runs; do
   if [ "$conclusion" != "success" ]; then
     status=1
     # Compiler errors, Gradle's summary, failed tests (the emulator job prints them from its result files).
-    grep -E "e: file|error:|What went wrong|^.{29}> .*|FAILED|<failure|AssertionError|Exception|SPECTRA" "$out/$name.log" \
+    grep -E "e: file|error:|What went wrong|FAILED|<failure|AssertionError|Exception|SPECTRA" "$out/$name.log" \
       | grep -v -E "sh -c|script:|--stacktrace" | cut -c30-400 | head -n "${CI_FAIL_LINES:-40}"
   else
     grep -E "SPECTRA" "$out/$name.log" | grep -v -E "sh -c|script:|grep" | cut -c30-300 | head -n 10
