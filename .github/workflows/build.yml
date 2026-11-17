@@ -30,7 +30,7 @@ jobs:
 
       - name: Build, test and lint
         shell: bash
-        run: ./gradlew :core:test --stacktrace 2>&1 | tee build.log
+        run: ./gradlew :core:test :app:assembleRelease :app:lintRelease --stacktrace 2>&1 | tee build.log
 
       - name: Point out what failed
         if: failure()
@@ -49,5 +49,28 @@ jobs:
           name: reports
           path: |
             build.log
+            app/build/reports/lint-results-release.html
             core/build/reports/tests/test
           if-no-files-found: ignore
+
+      - name: Keep the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: spectrasdr-apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish the test build
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk spectrasdr-test.apk
+          notes="Automatic test build from branch \`${{ github.ref_name }}\`, commit ${{ github.sha }}, $(date -u '+%Y-%m-%d %H:%M UTC'). Not a release: it can be incomplete or broken. Signed with the project's public test key."
+          if gh release view test-build >/dev/null 2>&1; then
+            gh release upload test-build spectrasdr-test.apk --clobber
+            gh release edit test-build --notes "$notes"
+          else
+            gh release create test-build spectrasdr-test.apk --prerelease --title "Latest test build" --notes "$notes" --target "${{ github.sha }}"
+          fi
+

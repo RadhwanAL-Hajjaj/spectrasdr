@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Launcher icon: a spectrum trace with one strong signal on a dark tile. Original artwork for this project. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF10151C"
+        android:pathData="M0,0h108v108H0z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF4DD0E1"
+        android:strokeWidth="4"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M24,74 L34,70 L40,73 L46,66 L50,71 L54,30 L58,71 L64,67 L70,73 L76,69 L84,74" />
+    <path
+        android:fillColor="#FF37474F"
+        android:pathData="M24,80h60v3H24z" />
+</vector>

@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "spectrasdr"
-include(":core")
+include(":core", ":app")
