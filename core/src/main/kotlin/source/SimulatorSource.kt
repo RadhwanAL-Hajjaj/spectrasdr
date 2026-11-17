@@ -116,25 +116,29 @@ class SimulatorSource(
                 }
                 val block = pool.obtain()
                 val out = block.samples
+                val count = BlockSizing.samplesPerBlock(rate, blockSize)
                 var at = random.nextInt(NOISE_SIZE)
-                for (n in 0 until blockSize) {
+                for (n in 0 until count) {
                     out[2 * n] = noiseLevel * noise[2 * at]
                     out[2 * n + 1] = noiseLevel * noise[2 * at + 1]
                     if (++at == NOISE_SIZE) at = 0
                 }
-                current.render(out, blockSize, centerHz)
-                block.length = blockSize
+                current.render(out, count, centerHz)
+                block.length = count
                 block.seq = seq++
                 block.centerHz = centerHz
                 block.sampleRate = rate
                 block.tuneEpoch = epoch
-                emitted += blockSize
+                emitted += count
                 val wait = startNs + (WavIqFileSource.dueNanos(emitted, rate) / speed).toLong() - System.nanoTime()
                 if (wait > 0) Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt())
                 listener.onBlock(block)
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+        } catch (e: RuntimeException) {
+            // A bug here or in the listener must end the stream with a report, not end the process.
+            listener.onError(SourceError.Io("The simulator stopped: ${e.message ?: e.javaClass.simpleName}"))
         } finally {
             running = false
             listener.onStopped()
