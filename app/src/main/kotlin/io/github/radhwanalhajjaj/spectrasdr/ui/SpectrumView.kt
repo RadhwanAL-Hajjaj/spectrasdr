@@ -100,7 +100,7 @@ fun SpectrumView(
             .testTag("spectrum")
             .pointerInput(Unit) {
                 detectTapGestures { at ->
-                    if (data.valid) {
+                    if (data.valid && data.frame.sampleRate > 0) {
                         val scale = SpectrumScale(data.frame.centerHz, data.frame.sampleRate)
                         tune(FrequencyText.snap(scale.hzAt(at.x / size.width), step))
                     }

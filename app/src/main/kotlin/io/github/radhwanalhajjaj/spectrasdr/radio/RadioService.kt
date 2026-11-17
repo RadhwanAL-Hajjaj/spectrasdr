@@ -47,7 +47,11 @@ class RadioService : Service() {
         when (change) {
             AudioManager.AUDIOFOCUS_GAIN -> radio.setPaused(false)
             // A permanent loss is never followed by a gain: end the session instead of playing silence.
-            AudioManager.AUDIOFOCUS_LOSS -> radio.stopBecause("Stopped: another app is playing audio.")
+            // The request is given up, so that the next session asks for the focus again.
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                abandonFocus()
+                radio.stopBecause("Stopped: another app is playing audio.")
+            }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> radio.setPaused(true)
         }
