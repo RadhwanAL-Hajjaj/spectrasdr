@@ -11,9 +11,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import io.github.radhwanalhajjaj.spectrasdr.core.session.DriverUri
@@ -56,8 +57,6 @@ object DriverHandOff {
             ?: "The SDR driver could not start the dongle. Check that it is plugged in and that the driver app has permission to use it."
 }
 
-private class Attempt(val port: Int, val address: String, val handlers: List<ComponentName>, val index: Int)
-
 /**
  * Returns a function that asks the installed driver apps, one after the other, to start the
  * dongle, and reports the outcome.
@@ -66,38 +65,52 @@ private class Attempt(val port: Int, val address: String, val handlers: List<Com
 fun rememberDriverStarter(radio: Radio, onOutcome: (DriverOutcome) -> Unit): () -> Unit {
     val context = LocalContext.current
     val outcome by rememberUpdatedState(onOutcome)
-    var attempt by remember { mutableStateOf<Attempt?>(null) }
-    lateinit var launch: (Attempt) -> Unit
+    // The request in progress, saved: the driver's answer may arrive in a recreated activity.
+    // address is null while nothing is asked; the handlers are looked up again from it.
+    var port by rememberSaveable { mutableIntStateOf(0) }
+    var address by rememberSaveable { mutableStateOf<String?>(null) }
+    var index by rememberSaveable { mutableIntStateOf(0) }
+    lateinit var launch: (String, List<ComponentName>) -> Unit
 
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val a = attempt ?: return@rememberLauncherForActivityResult
+        val asked = address ?: return@rememberLauncherForActivityResult
+        val handlers = DriverHandOff.handlers(context, asked)
         when {
             result.resultCode == Activity.RESULT_OK -> {
-                attempt = null
-                outcome(DriverOutcome.Started(DriverHandOff.started(a.port, result.data)))
+                address = null
+                outcome(DriverOutcome.Started(DriverHandOff.started(port, result.data)))
             }
-            a.index + 1 < a.handlers.size -> launch(Attempt(a.port, a.address, a.handlers, a.index + 1))
+            index + 1 < handlers.size -> {
+                index += 1
+                launch(asked, handlers)
+            }
             else -> {
-                attempt = null
+                address = null
                 outcome(DriverOutcome.Refused(DriverHandOff.refusal(result.data)))
             }
         }
     }
-    launch = { a ->
-        attempt = a
+    launch = { asked, handlers ->
         try {
-            launcher.launch(DriverHandOff.intent(a.address, a.handlers[a.index]))
+            launcher.launch(DriverHandOff.intent(asked, handlers[index]))
         } catch (_: ActivityNotFoundException) {
-            attempt = null
+            address = null
             outcome(DriverOutcome.NotInstalled)
         }
     }
 
     return {
-        val port = DriverHandOff.freePort()
+        val free = DriverHandOff.freePort()
         val settings = radio.settings.value
-        val address = DriverUri.build(port, Radio.DEFAULT_RATE, settings.frequencyHz.coerceIn(0, 0xFFFF_FFFFL))
-        val handlers = DriverHandOff.handlers(context, address)
-        if (handlers.isEmpty()) outcome(DriverOutcome.NotInstalled) else launch(Attempt(port, address, handlers, 0))
+        val asked = DriverUri.build(free, Radio.DEFAULT_RATE, settings.frequencyHz.coerceIn(0, 0xFFFF_FFFFL))
+        val handlers = DriverHandOff.handlers(context, asked)
+        if (handlers.isEmpty()) {
+            outcome(DriverOutcome.NotInstalled)
+        } else {
+            port = free
+            address = asked
+            index = 0
+            launch(asked, handlers)
+        }
     }
 }
