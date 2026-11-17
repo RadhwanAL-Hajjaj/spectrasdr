@@ -74,6 +74,10 @@ class Radio(private val context: Context) : SessionListener {
 
     val fftSize: Int get() = session.fftSize
 
+    /**
+     * Starts listening to [spec]. Call it from a visible activity: Android refuses to start the
+     * foreground service from the background, and then nothing starts and [stopReason] says why.
+     */
     fun start(spec: SourceSpec) {
         _stopReason.value = null
         lastSpec = spec
@@ -83,7 +87,19 @@ class Radio(private val context: Context) : SessionListener {
             startsPending++
             _serviceWanted.value = true
         }
-        RadioService.start(context)
+        try {
+            RadioService.start(context)
+        } catch (_: RuntimeException) {
+            // ForegroundServiceStartNotAllowedException (API 31+) or IllegalStateException (26–30).
+            synchronized(serviceLock) {
+                startsPending--
+                val ended = _state.value is SessionState.Idle || _state.value is SessionState.Failed
+                if (startsPending == 0 && ended) _serviceWanted.value = false
+            }
+            _stopReason.value = BACKGROUND_START
+            _messages.tryEmit(BACKGROUND_START)
+            return
+        }
         player.start()
         session.start(spec)
     }
@@ -176,6 +192,8 @@ class Radio(private val context: Context) : SessionListener {
 
         /** The simulator makes its band in real time; a modest rate keeps it light on slow devices. */
         const val SIMULATOR_RATE = 960_000
+
+        private const val BACKGROUND_START = "Cannot start listening from the background. Open SpectraSDR and press Listen."
     }
 }
 
