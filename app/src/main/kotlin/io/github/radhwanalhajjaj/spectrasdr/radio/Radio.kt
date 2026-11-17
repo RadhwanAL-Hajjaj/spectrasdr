@@ -44,6 +44,7 @@ class Radio(private val context: Context) : SessionListener {
     private val _serviceWanted = MutableStateFlow(false)
     private val serviceLock = Any()
     private var startsPending = 0   // start() calls the session has not begun yet; guarded by serviceLock
+    private val _stopReason = MutableStateFlow<String?>(null)
     private val _messages = MutableSharedFlow<String>(extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     val state: StateFlow<SessionState> get() = _state
@@ -56,6 +57,9 @@ class Radio(private val context: Context) : SessionListener {
     /** The gain controls of an SDRplay receiver. */
     val rspGain: StateFlow<RspGain> get() = _rspGain
     val messages: SharedFlow<String> get() = _messages
+
+    /** Why the last session was stopped by the app rather than by the user; cleared by [start]. */
+    val stopReason: StateFlow<String?> get() = _stopReason
 
     /**
      * Whether [RadioService] should be running: from [start] until the session it started has ended.
@@ -71,6 +75,7 @@ class Radio(private val context: Context) : SessionListener {
     val fftSize: Int get() = session.fftSize
 
     fun start(spec: SourceSpec) {
+        _stopReason.value = null
         lastSpec = spec
         store.saveSpec(spec)
         update { it.copy(sampleRate = store.loadRate(spec)) }
@@ -89,6 +94,7 @@ class Radio(private val context: Context) : SessionListener {
 
     /** Stops the session and tells the user why. */
     fun stopBecause(text: String) {
+        _stopReason.value = text
         _messages.tryEmit(text)
         session.stop()
     }

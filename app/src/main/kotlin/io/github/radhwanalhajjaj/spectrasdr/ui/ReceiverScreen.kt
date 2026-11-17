@@ -78,6 +78,7 @@ fun ReceiverScreen(radio: Radio) {
     val settings by radio.settings.collectAsState()
     val gain by radio.gain.collectAsState()
     val rspGain by radio.rspGain.collectAsState()
+    val stopReason by radio.stopReason.collectAsState()
     var typing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
@@ -123,7 +124,7 @@ fun ReceiverScreen(radio: Radio) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 12.dp),
         ) {
-            StateLine(state, status)
+            StateLine(state, status, stopReason)
             FrequencyReadout(
                 frequencyHz = settings.frequencyHz,
                 onChange = { hz -> radio.update { it.copy(frequencyHz = hz) } },
@@ -215,9 +216,10 @@ private fun sourceLabel(state: SessionState, last: SourceSpec): String = when (s
 }
 
 @Composable
-private fun StateLine(state: SessionState, status: ReceiverStatus) {
+private fun StateLine(state: SessionState, status: ReceiverStatus, stopReason: String?) {
     val text = when (state) {
-        SessionState.Idle -> "Stopped"
+        // The reasons say "Stopped: …" or "Audio output failed …" themselves.
+        SessionState.Idle -> stopReason ?: "Stopped"
         is SessionState.Connecting -> if (state.attempt == 0) "Connecting to ${state.spec.label}…" else "Reconnecting to ${state.spec.label}…"
         is SessionState.Running -> {
             val rate = "${FrequencyText.fixed(status.sampleRate / 1e6, 2)} MS/s"
