@@ -4,7 +4,9 @@ package io.github.radhwanalhajjaj.spectrasdr.core.audio
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
+import java.lang.management.ManagementFactory
 import kotlin.concurrent.thread
 
 class AudioRingTest {
@@ -85,7 +87,7 @@ class AudioRingTest {
     fun oneWriterAndOneReaderLoseNothingAndKeepTheOrder() {
         val ring = AudioRing(sampleRate = 48_000, targetMillis = 20)
         val total = 400_000
-        val writer = thread {
+        val writer = thread(isDaemon = true) {
             var next = 0
             val buf = FloatArray(2 * 256)
             while (next < total) {
@@ -107,13 +109,36 @@ class AudioRingTest {
                 assertEquals(-(expected + i).toFloat(), out[2 * i + 1], 0f)
             }
             expected += n
-            if (n == 0 && !writer.isAlive && ring.fillLevel() * ring.capacityFrames < ring.targetFrames) {
-                ring.write(FloatArray(2 * ring.targetFrames), ring.targetFrames, 2)   // let the tail out
-                break
-            }
         }
         writer.join(5_000)
+        assertTrue("the writer did not finish", !writer.isAlive)
         assertEquals(0L, ring.droppedFrames)
         assertTrue("read $expected of $total frames", expected >= total - ring.capacityFrames)
+    }
+
+    @Test
+    fun writeAndReadAllocateNothing() {
+        val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
+        assumeTrue("this JVM cannot count a thread's allocations", bean != null && bean.isThreadAllocatedMemorySupported)
+        bean!!
+        val thread = Thread.currentThread().id
+        val ring = AudioRing(sampleRate = 48_000, targetMillis = 10)
+        val stereo = FloatArray(2 * 64)
+        val mono = FloatArray(64)
+        val out = FloatArray(2 * 128)
+        fun pair() {
+            ring.write(stereo, 64, 2)
+            ring.write(mono, 64, 1)
+            ring.read(out, 128)
+        }
+        repeat(500) { pair() }
+        // The JIT compiler can charge a one-off to this thread, so the quietest window counts.
+        var quietest = Long.MAX_VALUE
+        repeat(5) {
+            val before = bean.getThreadAllocatedBytes(thread)
+            repeat(1_000) { pair() }
+            quietest = minOf(quietest, bean.getThreadAllocatedBytes(thread) - before)
+        }
+        assertEquals("bytes allocated in 1,000 write and read pairs", 0L, quietest)
     }
 }

@@ -50,7 +50,8 @@ class AudioRing(override val sampleRate: Int = 48_000, targetMillis: Int = 150) 
         val n = minOf(frames, free)
         var at = (w % capacityFrames).toInt() * 2
         if (channels == 2) {
-            for (i in 0 until 2 * n step 2) {
+            for (f in 0 until n) {
+                val i = 2 * f
                 data[at] = samples[i]
                 data[at + 1] = samples[i + 1]
                 at += 2
@@ -81,7 +82,8 @@ class AudioRing(override val sampleRate: Int = 48_000, targetMillis: Int = 150) 
         if (refilling && available >= targetFrames) refilling = false
         val n = if (refilling) 0 else minOf(frames, available)
         var at = (t % capacityFrames).toInt() * 2
-        for (i in 0 until 2 * n step 2) {
+        for (f in 0 until n) {
+            val i = 2 * f
             dst[i] = data[at]
             dst[i + 1] = data[at + 1]
             at += 2
