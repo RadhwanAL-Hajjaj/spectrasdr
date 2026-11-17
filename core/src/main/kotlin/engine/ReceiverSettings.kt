@@ -92,6 +92,17 @@ data class ReceiverStatus(
  * and spectrum stop while it runs. A callback may call [Receiver.update] and [Receiver.stop] (which
  * then only asks for the stop and returns at once).
  */
+/** The engine's long-running threads, as a [ThreadHook] is told about them. */
+enum class ThreadRole { SOURCE, DSP }
+
+/**
+ * Called once on each of the engine's long-running threads, from that thread, when it starts
+ * work: the host raises the thread's priority there (§4.4). It must not throw or block.
+ */
+fun interface ThreadHook {
+    fun started(role: ThreadRole)
+}
+
 interface ReceiverListener {
     /**
      * The source has started streaming; called at most once per session (not at all when the source

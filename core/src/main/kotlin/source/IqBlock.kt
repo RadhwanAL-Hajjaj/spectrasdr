@@ -36,6 +36,18 @@ class IqBlock internal constructor(val capacity: Int, private val pool: BlockPoo
     }
 }
 
+/**
+ * How many samples a source puts into one block (§4.3): a full block, or about 20 ms of samples
+ * when that is less, so audio and spectrum frames stay smooth at low sample rates.
+ */
+object BlockSizing {
+    const val BLOCKS_PER_SECOND = 50
+    const val MIN_SAMPLES = 256
+
+    fun samplesPerBlock(sampleRate: Int, capacity: Int): Int =
+        minOf(capacity, maxOf(MIN_SAMPLES, sampleRate / BLOCKS_PER_SECOND))
+}
+
 /** Thread-safe pool of equally sized blocks; allocates a new block when empty. */
 class BlockPool(val blockCapacity: Int, preallocate: Int = 0) {
     private val free = ArrayDeque<IqBlock>()

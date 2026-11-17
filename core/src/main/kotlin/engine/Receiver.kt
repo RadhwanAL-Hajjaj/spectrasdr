@@ -4,6 +4,7 @@ package io.github.radhwanalhajjaj.spectrasdr.core.engine
 import io.github.radhwanalhajjaj.spectrasdr.core.dsp.DcBlocker
 import io.github.radhwanalhajjaj.spectrasdr.core.rds.RdsState
 import io.github.radhwanalhajjaj.spectrasdr.core.source.BlockQueue
+import io.github.radhwanalhajjaj.spectrasdr.core.source.BlockSizing
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqBlock
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqSource
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
@@ -39,6 +40,7 @@ class Receiver(
     private val sink: AudioSink,
     initial: ReceiverSettings,
     private val listener: ReceiverListener,
+    private val threads: ThreadHook = ThreadHook { },
 ) {
     /**
      * The settings in force or about to be. Any thread may read it. The receiver itself replaces
@@ -161,6 +163,7 @@ class Receiver(
 
     private val sourceListener = object : SourceListener {
         override fun onStarted(info: SourceInfo) {
+            runCatching { threads.started(ThreadRole.SOURCE) }
             startedInfo = info
         }
 
@@ -172,7 +175,7 @@ class Receiver(
             if (block.sampleRate != queuedRate || block.capacity != queuedBlockSize) {
                 queuedRate = block.sampleRate
                 queuedBlockSize = block.capacity
-                queue.capacity = queueCapacity(block.sampleRate, block.capacity)
+                queue.capacity = queueCapacity(block.sampleRate, BlockSizing.samplesPerBlock(block.sampleRate, block.capacity))
             }
             queue.offer(block)
         }
@@ -188,6 +191,7 @@ class Receiver(
 
     private fun run() {
         try {
+            runCatching { threads.started(ThreadRole.DSP) }
             apply(settings)   // tunes the source before it is opened, so its first blocks are already right
             if (running) source.open(sourceListener)
             while (running) {

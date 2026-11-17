@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 package io.github.radhwanalhajjaj.spectrasdr.core.source
 
+import io.github.radhwanalhajjaj.spectrasdr.core.source.IqBlock
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.Receiver
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverListener
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverSettings
@@ -141,5 +142,30 @@ class SimulatorSourceTest {
         } finally {
             receiver.stop()
         }
+    }
+
+    @Test
+    fun aListenerThatThrowsEndsTheStreamWithAnError() {
+        val l = object : CollectingListener() {
+            override fun onBlock(block: IqBlock) {
+                block.release()
+                throw IllegalStateException("listener bug")
+            }
+        }
+        val source = SimulatorSource(emptyList(), speed = unpaced)
+        source.open(l)
+        assertTrue(l.stopped.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals("The simulator stopped: listener bug", l.errors.single().message)
+        source.close()
+    }
+
+    @Test
+    fun blocksLastAboutTwentyMillisecondsAtLowRates() {
+        val source = SimulatorSource(emptyList(), initialSampleRate = 240_000, speed = unpaced)
+        val l = CollectingListener()
+        source.open(l)
+        l.awaitEpochSamples(epoch = 0, complex = 24_000)
+        source.close()
+        assertTrue(l.blocks.all { it.samples.size == 2 * 4_800 })
     }
 }
