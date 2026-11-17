@@ -109,6 +109,10 @@ class AudioRingTest {
                 assertEquals(-(expected + i).toFloat(), out[2 * i + 1], 0f)
             }
             expected += n
+            if (n == 0) {
+                if (!writer.isAlive && ring.fillLevel() * ring.capacityFrames < ring.targetFrames) break   // the tail cannot play
+                Thread.yield()
+            }
         }
         writer.join(5_000)
         assertTrue("the writer did not finish", !writer.isAlive)
@@ -119,7 +123,7 @@ class AudioRingTest {
     @Test
     fun writeAndReadAllocateNothing() {
         val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
-        assumeTrue("this JVM cannot count a thread's allocations", bean != null && bean.isThreadAllocatedMemorySupported)
+        assumeTrue("this JVM cannot count a thread's allocations", bean != null && bean.isThreadAllocatedMemorySupported && bean.isThreadAllocatedMemoryEnabled)
         bean!!
         val thread = Thread.currentThread().id
         val ring = AudioRing(sampleRate = 48_000, targetMillis = 10)
