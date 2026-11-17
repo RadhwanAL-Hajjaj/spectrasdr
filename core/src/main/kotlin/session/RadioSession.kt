@@ -8,6 +8,7 @@ import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverSettings
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverStatus
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ThreadHook
 import io.github.radhwanalhajjaj.spectrasdr.core.rds.RdsState
+import io.github.radhwanalhajjaj.spectrasdr.core.source.GainModel
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqSource
 import io.github.radhwanalhajjaj.spectrasdr.core.source.OptionKind
@@ -16,9 +17,11 @@ import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceInfo
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceOption
 import io.github.radhwanalhajjaj.spectrasdr.core.spectrum.SpectrumFrame
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Listening sessions as the app sees them: pick a source, start, change settings, stop. It builds
@@ -47,7 +50,11 @@ class RadioSession(
         require(backoffSeconds.isNotEmpty() && backoffSeconds.all { it >= 0 }) { "back-off needs at least one delay, none negative" }
     }
 
-    private val executor = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "radio-session").apply { isDaemon = true } }
+    private val executor = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "radio-session").apply { isDaemon = true } }.apply {
+        removeOnCancelPolicy = true                              // a cancelled retry leaves the queue at once
+        executeExistingDelayedTasksAfterShutdownPolicy = false   // a pending retry does not keep the thread alive
+    }
+    private val closed = AtomicBoolean(false)
     private val settingsLock = Any()
 
     @Volatile private var wanted = initialSettings
@@ -82,7 +89,7 @@ class RadioSession(
 
     /** Starts listening to [spec], ending whatever ran before. */
     fun start(spec: SourceSpec) {
-        executor.execute {
+        post {
             stopNow()
             this.spec = spec
             attempt = 0
@@ -93,7 +100,7 @@ class RadioSession(
 
     /** Stops listening. */
     fun stop() {
-        executor.execute {
+        post {
             stopNow()
             spec = null
             publish(SessionState.Idle)
@@ -119,17 +126,17 @@ class RadioSession(
 
     fun setGain(gain: GainSetting) {
         gains[controlOf(gain)] = gain
-        runCatching { source?.setGain(gain) }
+        control("gain") { source?.setGain(gain) }
     }
 
     fun setPpm(ppm: Int) {
         this.ppm = ppm
-        runCatching { source?.setPpm(ppm) }
+        control("frequency correction") { source?.setPpm(ppm) }
     }
 
     fun setOption(option: SourceOption) {
         options[option.kind] = option
-        runCatching { source?.setOption(option) }
+        control("option") { source?.setOption(option) }
     }
 
     /** Copies the newest spectrum frame into [dst] if there is one it has not seen; any thread. */
@@ -137,8 +144,26 @@ class RadioSession(
 
     /** Ends the session for good. */
     override fun close() {
-        executor.execute { stopNow() }
+        if (!closed.compareAndSet(false, true)) return
+        post { stopNow() }
         executor.shutdown()
+    }
+
+    /** Runs [block] on the session thread; after [close] it is ignored. */
+    private fun post(block: () -> Unit) {
+        try {
+            executor.execute(block)
+        } catch (_: RejectedExecutionException) {
+        }
+    }
+
+    /** Sends one control to the source; a failure becomes a message for the user, not a lost exception. */
+    private fun control(what: String, action: () -> Unit) {
+        try {
+            action()
+        } catch (e: Exception) {
+            listener.onMessage("Could not change the $what: ${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     // ---- session thread ----
@@ -147,18 +172,25 @@ class RadioSession(
         val spec = spec ?: return
         val gen = ++generation
         publish(SessionState.Connecting(spec, attempt))
-        val src = try {
-            sources.create(spec, wanted)
+        var src: IqSource? = null
+        var r: Receiver? = null
+        try {
+            val s = sources.create(spec, wanted)
+            src = s
+            // The settings are read where the receiver is published, so a change made while the
+            // source was being built is neither lost nor overwritten.
+            r = synchronized(settingsLock) {
+                Receiver(s, sink, wanted, Events(gen, spec, s), threads).also {
+                    source = s
+                    receiver = it
+                }
+            }
+            r.start()
         } catch (e: RuntimeException) {
-            publish(SessionState.Failed(spec, "Cannot use ${spec.label}: ${e.message}"))
-            return
+            r?.let { forget(it) }
+            runCatching { src?.close() }
+            publish(SessionState.Failed(spec, "Cannot use ${spec.label}: ${e.message ?: e.javaClass.simpleName}"))
         }
-        val r = Receiver(src, sink, wanted, Events(gen, spec, src), threads)
-        synchronized(settingsLock) {
-            source = src
-            receiver = r
-        }
-        r.start()
     }
 
     /** Stops the receiver, if any, and forgets it; later events from it are ignored. */
@@ -183,9 +215,9 @@ class RadioSession(
 
     private fun started(spec: SourceSpec, src: IqSource, info: SourceInfo) {
         runningSinceNs = nanoTime()
-        for (g in gains.values) runCatching { src.setGain(g) }
-        ppm?.let { p -> runCatching { src.setPpm(p) } }
-        for (o in options.values) if (o.kind in info.options) runCatching { src.setOption(o) }
+        for (g in gains.values) if (fits(g, info.gainModel)) control("gain") { src.setGain(g) }
+        ppm?.let { p -> control("frequency correction") { src.setPpm(p) } }
+        for (o in options.values) if (o.kind in info.options) control("option") { src.setOption(o) }
         publish(SessionState.Running(spec, info))
     }
 
@@ -217,6 +249,12 @@ class RadioSession(
         retry = executor.schedule({ retry = null; connect() }, seconds.toLong(), TimeUnit.SECONDS)
     }
 
+    private fun fits(gain: GainSetting, model: GainModel): Boolean = when (model) {
+        is GainModel.TunerSteps -> gain is GainSetting.Auto || gain is GainSetting.TunerTenthsDb || gain is GainSetting.TunerIndex
+        is GainModel.Rsp -> gain is GainSetting.RspLna || gain is GainSetting.RspIfgr || gain is GainSetting.RspAgc
+        GainModel.None -> false
+    }
+
     private fun controlOf(gain: GainSetting): String = when (gain) {
         is GainSetting.Auto, is GainSetting.TunerTenthsDb, is GainSetting.TunerIndex -> "tuner"
         is GainSetting.RspLna -> "lna"
@@ -236,7 +274,7 @@ class RadioSession(
         private val current get() = gen == generation
 
         override fun onSourceStarted(info: SourceInfo) {
-            executor.execute { if (current) started(spec, src, info) }
+            post { if (current) started(spec, src, info) }
         }
 
         override fun onStatus(status: ReceiverStatus) {
@@ -257,7 +295,7 @@ class RadioSession(
 
         override fun onStopped() {
             val r = receiver
-            runCatching { executor.execute { if (current && r != null) ended(spec, r, error) } }
+            post { if (current && r != null) ended(spec, r, error) }
         }
     }
 }

@@ -4,9 +4,11 @@ package io.github.radhwanalhajjaj.spectrasdr.core.session
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.Mode
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverSettings
 import io.github.radhwanalhajjaj.spectrasdr.core.engine.ReceiverStatus
+import io.github.radhwanalhajjaj.spectrasdr.core.source.GainModel
 import io.github.radhwanalhajjaj.spectrasdr.core.source.GainSetting
 import io.github.radhwanalhajjaj.spectrasdr.core.source.IqSource
 import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceError
+import io.github.radhwanalhajjaj.spectrasdr.core.source.SourceInfo
 import io.github.radhwanalhajjaj.spectrasdr.core.testutil.CollectingSink
 import io.github.radhwanalhajjaj.spectrasdr.core.testutil.ScriptedSource
 import org.junit.After
@@ -15,6 +17,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class RadioSessionTest {
@@ -43,8 +48,10 @@ class RadioSessionTest {
         backoff: List<Int> = listOf(0),
         giveUpSeconds: Int = 120,
         clock: () -> Long = System::nanoTime,
-        factory: SourceFactory = SourceFactory { _, _ -> Recording(ScriptedSource()).also { made += it } },
-    ) = RadioSession(CollectingSink(), settings, events, factory, backoff, giveUpSeconds, stableSeconds = 10, nanoTime = clock).also { session = it }
+        stableSeconds: Int = 10,
+        gainModel: GainModel = GainModel.None,
+        factory: SourceFactory = SourceFactory { _, _ -> Recording(ScriptedSource(gainModel = gainModel)).also { made += it } },
+    ) = RadioSession(CollectingSink(), settings, events, factory, backoff, giveUpSeconds, stableSeconds, nanoTime = clock).also { session = it }
 
     @After
     fun closeSession() {
@@ -107,10 +114,10 @@ class RadioSessionTest {
 
     @Test
     fun aLostNetworkSourceIsReconnectedWithTheSameSettingsAndGain() {
-        val s = session(backoff = listOf(0))
+        val s = session(backoff = listOf(0), gainModel = GainModel.TunerSteps(listOf(0, 100, 297)))
         s.setGain(GainSetting.TunerTenthsDb(100))
         s.setGain(GainSetting.TunerTenthsDb(297))          // replaces the one before
-        s.setGain(GainSetting.RspLna(3))                   // a separate control: kept as well
+        s.setGain(GainSetting.RspLna(3))                   // a gain this source does not have: not restored
         s.start(network)
         awaitRunning()
         s.update { it.copy(frequencyHz = 145_500_000) }
@@ -120,15 +127,16 @@ class RadioSessionTest {
         assertEquals(1, waiting.attempt)
         assertEquals("The connection to radio.example:1234 was lost.", waiting.reason)
         assertEquals(2, made.size)
-        assertEquals(setOf<GainSetting>(GainSetting.TunerTenthsDb(297), GainSetting.RspLna(3)), made[1].gains.toSet())
-        assertEquals(2, made[1].gains.size)
+        assertEquals(listOf<GainSetting>(GainSetting.TunerTenthsDb(297)), made[1].gains.toList())
         assertEquals(145_500_000, s.settings.frequencyHz)
     }
 
     @Test
     fun reconnectingGivesUpAfterTheLimit() {
         val now = AtomicLong(0)
-        val s = session(backoff = listOf(0), giveUpSeconds = 120, clock = { now.get() }) { _, _ ->
+        // stableSeconds above giveUpSeconds: a clock jump between a failed attempt's start and end
+        // must not count as a stable connection and restart the give-up timer.
+        val s = session(backoff = listOf(0), giveUpSeconds = 120, clock = { now.get() }, stableSeconds = 1_000) { _, _ ->
             Recording(ScriptedSource()).also { made += it; it.inner.fail(SourceError.ConnectFailed("Cannot connect")) }
         }
         s.start(network)
@@ -197,5 +205,100 @@ class RadioSessionTest {
         s.start(network)
         await("failure") { s.state is SessionState.Failed }
         assertEquals("Cannot use radio.example:1234: port 0 is outside 1..65535", (s.state as SessionState.Failed).message)
+    }
+
+    @Test
+    fun gainsRestoredAreOnlyThoseTheSourceHas() {
+        val s = session(gainModel = GainModel.Rsp(lnaStates = 4, ifgrMin = 20, ifgrMax = 59, agc = true))
+        s.setGain(GainSetting.TunerTenthsDb(297))          // not an RSP gain
+        s.setGain(GainSetting.RspLna(3))
+        s.setGain(GainSetting.RspIfgr(40))
+        s.start(SourceSpec.Simulator)
+        awaitRunning()
+        assertEquals(setOf<GainSetting>(GainSetting.RspLna(3), GainSetting.RspIfgr(40)), made[0].gains.toSet())
+        assertEquals(2, made[0].gains.size)
+    }
+
+    private class ThrowingGain(val inner: ScriptedSource) : IqSource by inner {
+        override fun setGain(gain: GainSetting) = throw IllegalStateException("the tuner refused it")
+    }
+
+    @Test
+    fun aControlThatThrowsProducesOneMessage() {
+        val s = session(factory = { _, _ -> ThrowingGain(ScriptedSource(gainModel = GainModel.TunerSteps(listOf(0, 100)))) })
+        s.setGain(GainSetting.Auto)                         // restored when the source starts
+        s.start(SourceSpec.Simulator)
+        awaitRunning()
+        await("the message for the restore") { events.messages.size == 1 }
+        assertEquals("Could not change the gain: the tuner refused it", events.messages.single())
+        s.setGain(GainSetting.TunerTenthsDb(100))           // while running
+        assertEquals(2, events.messages.size)
+        assertEquals("Could not change the gain: the tuner refused it", events.messages[1])
+    }
+
+    /** Reads of [info] go through [onInfo]; the receiver reads it while it is being built. */
+    private class InfoHook(val inner: ScriptedSource, val onInfo: () -> Unit) : IqSource by inner {
+        override val info: SourceInfo get() { onInfo(); return inner.info }
+    }
+
+    @Test
+    fun aSettingsChangeMadeWhileTheReceiverIsBeingBuiltIsKept() {
+        val once = AtomicBoolean(false)
+        val s = session(factory = { _, _ ->
+            val rec = Recording(ScriptedSource()).also { made += it }
+            InfoHook(rec.inner) {
+                if (once.compareAndSet(false, true)) {
+                    val done = CountDownLatch(1)
+                    Thread { session!!.update { it.copy(frequencyHz = 145_500_000) }; done.countDown() }.start()
+                    done.await(300, TimeUnit.MILLISECONDS)   // not needed once the receiver is built under the lock
+                }
+            }
+        })
+        s.start(SourceSpec.Simulator)
+        awaitRunning()
+        await("the new frequency") { s.settings.frequencyHz == 145_500_000L }
+        await("the source tuned near it") { made[0].inner.calls.any { it.startsWith("freq 1454") || it.startsWith("freq 1455") } }
+        s.stop()
+        await("idle") { s.state == SessionState.Idle }
+        assertEquals(145_500_000, s.settings.frequencyHz)
+    }
+
+    private class BrokenInfo(val inner: ScriptedSource) : IqSource by inner {
+        override val info: SourceInfo get() = throw IllegalStateException()
+    }
+
+    @Test
+    fun aReceiverThatCannotBeBuiltFailsTheSessionAndClosesTheSource() {
+        val inner = ScriptedSource()
+        val s = session(factory = { _, _ -> BrokenInfo(inner) })
+        s.start(network)
+        await("failure") { s.state is SessionState.Failed }
+        assertEquals("Cannot use radio.example:1234: IllegalStateException", (s.state as SessionState.Failed).message)
+        assertEquals("close", inner.calls.last())
+    }
+
+    @Test
+    fun aSourceThatCannotBeBuiltWithoutAMessageIsNamedByItsException() {
+        val s = session { _, _ -> throw IllegalStateException() }
+        s.start(network)
+        await("failure") { s.state is SessionState.Failed }
+        assertEquals("Cannot use radio.example:1234: IllegalStateException", (s.state as SessionState.Failed).message)
+    }
+
+    private fun sessionThreadAlive() = Thread.getAllStackTraces().keys.any { it.name == "radio-session" && it.isAlive }
+
+    @Test
+    fun closingTwiceIsFineAndACancelledRetryDoesNotKeepTheThreadAlive() {
+        val s = session(backoff = listOf(30)) { _, _ ->
+            Recording(ScriptedSource()).also { made += it; it.inner.fail(SourceError.ConnectFailed("Cannot connect")) }
+        }
+        s.start(network)
+        await("waiting") { s.state is SessionState.Waiting }
+        s.close()
+        s.close()
+        s.start(SourceSpec.Simulator)                       // ignored after close
+        s.stop()
+        await("the session thread to end") { !sessionThreadAlive() }
+        assertEquals(1, made.size)
     }
 }

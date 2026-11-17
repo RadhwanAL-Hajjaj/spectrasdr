@@ -40,9 +40,10 @@ class ScriptedSource(
     private val startedKind: SourceKind? = null,
     /** Sample rates above this are refused with an IllegalArgumentException. */
     private val maxSampleRate: Int = Int.MAX_VALUE,
+    gainModel: GainModel = GainModel.None,
 ) : IqSource {
     @Volatile
-    override var info = SourceInfo("Scripted", kind, SampleFormat.S16LE, canTune, listOf(initialSampleRate), GainModel.None, emptySet())
+    override var info = SourceInfo("Scripted", kind, SampleFormat.S16LE, canTune, listOf(initialSampleRate), gainModel, emptySet())
         private set
 
     /** Everything asked of the source, in order: "rate 240000", "freq 100000000", "open", "close". */
