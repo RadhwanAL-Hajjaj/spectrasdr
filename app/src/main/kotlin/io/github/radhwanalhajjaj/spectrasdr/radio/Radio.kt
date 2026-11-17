@@ -28,7 +28,7 @@ class Radio(private val context: Context) : SessionListener {
     private val store = SettingsStore(context)
 
     val ring = AudioRing()
-    val player = AudioPlayer(ring)
+    val player = AudioPlayer(ring) { stopBecause("Audio output failed: $it") }
     private val session = RadioSession(
         ring, store.loadSettings(), this,
         // The source and DSP threads feed the audio: they run at audio priority (§4.4).
@@ -84,6 +84,12 @@ class Radio(private val context: Context) : SessionListener {
     }
 
     fun stop() {
+        session.stop()
+    }
+
+    /** Stops the session and tells the user why. */
+    fun stopBecause(text: String) {
+        _messages.tryEmit(text)
         session.stop()
     }
 

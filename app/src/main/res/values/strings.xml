@@ -6,5 +6,5 @@
     <string name="action_stop">Stop</string>
     <string name="state_starting">Starting…</string>
     <string name="state_connecting">Connecting to %1$s…</string>
-    <string name="state_waiting">Connection lost. Trying again in %1$d s.</string>
+    <string name="state_waiting">Connection lost. Trying again in %1$s s.</string>
 </resources>

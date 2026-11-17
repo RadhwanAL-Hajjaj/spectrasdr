@@ -41,11 +41,13 @@ class RadioService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var focusRequest: AudioFocusRequest? = null
     private var inForeground = false   // main thread only
+    private var startId = 0            // the latest start id; main thread only
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_GAIN -> radio.setPaused(false)
-            AudioManager.AUDIOFOCUS_LOSS,
+            // A permanent loss is never followed by a gain: end the session instead of playing silence.
+            AudioManager.AUDIOFOCUS_LOSS -> radio.stopBecause("Stopped: another app is playing audio.")
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> radio.setPaused(true)
         }
@@ -63,10 +65,7 @@ class RadioService : Service() {
             combine(radio.state, radio.settings, radio.rds) { state, settings, rds ->
                 Triple(state, "${FrequencyText.short(settings.frequencyHz)} ${settings.mode.name}", rds.ps.trim())
             }.distinctUntilChanged().collect { (state, tuning, station) ->
-                if (inForeground && state !is SessionState.Idle && state !is SessionState.Failed) {
-                    holdLocks(state)
-                    manager.notify(NOTIFICATION, notification(tuning, describe(state, station)))
-                }
+                if (inForeground) show(state, tuning, station)
             }
         }
         // Ends itself, and only after it has become a foreground service: stopping one that was asked
@@ -77,6 +76,7 @@ class RadioService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        this.startId = startId
         if (intent?.action == ACTION_STOP) {
             radio.stop()
             return START_NOT_STICKY
@@ -88,7 +88,14 @@ class RadioService : Service() {
             startForeground(NOTIFICATION, first)
         }
         inForeground = true
-        if (radio.serviceWanted.value) requestFocus() else finish()
+        if (radio.serviceWanted.value) {
+            requestFocus()
+            // The collector's first value came before this service was in the foreground: show it now.
+            val settings = radio.settings.value
+            show(radio.state.value, "${FrequencyText.short(settings.frequencyHz)} ${settings.mode.name}", radio.rds.value.ps.trim())
+        } else {
+            finish()
+        }
         return START_NOT_STICKY
     }
 
@@ -99,18 +106,24 @@ class RadioService : Service() {
         super.onDestroy()
     }
 
+    private fun show(state: SessionState, tuning: String, station: String) {
+        if (state is SessionState.Idle || state is SessionState.Failed) return
+        holdLocks(state)
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION, notification(tuning, describe(state, station)))
+    }
+
     private fun finish() {
         inForeground = false
         releaseLocks()
         abandonFocus()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopSelf(startId)
     }
 
     private fun describe(state: SessionState, station: String): String = when (state) {
         is SessionState.Connecting -> getString(R.string.state_connecting, state.spec.label)
         is SessionState.Running -> station.ifEmpty { state.info.name }
-        is SessionState.Waiting -> getString(R.string.state_waiting, state.seconds)
+        is SessionState.Waiting -> getString(R.string.state_waiting, state.seconds.toString())
         is SessionState.Failed -> state.message
         SessionState.Idle -> ""
     }
@@ -143,8 +156,12 @@ class RadioService : Service() {
         val network = when (state) {
             is SessionState.Connecting -> state.spec is SourceSpec.Network
             is SessionState.Running -> state.spec is SourceSpec.Network
-            is SessionState.Waiting -> true
+            is SessionState.Waiting -> state.spec is SourceSpec.Network
             else -> false
+        }
+        if (!network) {
+            wifiLock?.let { if (it.isHeld) it.release() }
+            wifiLock = null
         }
         if (network && wifiLock == null) {
             val mode = if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
