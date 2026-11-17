@@ -10,7 +10,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Plays what the receiver puts into the [AudioRing]: an AudioTrack fed by its own thread in 10 ms
- * pieces. The ring decides between audio and silence, so the track never starves.
+ * pieces. The ring decides between audio and silence, so the track never starves. [onError] gets
+ * the reason the output ended, worded for the user.
  */
 class AudioPlayer(private val ring: AudioRing, private val onError: (String) -> Unit = {}) {
     private var thread: Thread? = null
@@ -55,30 +56,14 @@ class AudioPlayer(private val ring: AudioRing, private val onError: (String) -> 
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val rate = ring.sampleRate
         val piece = rate / 100
-        val minBytes = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
-        val track = try {
-            AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(rate)
-                        .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                        .build(),
-                )
-                .setBufferSizeInBytes(maxOf(minBytes, 4 * piece * BYTES_PER_FRAME))
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
+        var track = try {
+            newTrack(rate, piece)
         } catch (e: RuntimeException) {
             if (running.get()) report(e)
             return
         }
         val buffer = FloatArray(2 * piece)
+        var rebuilt = false
         try {
             ring.clear()
             track.play()
@@ -100,7 +85,19 @@ class AudioPlayer(private val ring: AudioRing, private val onError: (String) -> 
                 }
                 ring.read(buffer, piece)
                 val written = track.write(buffer, 0, buffer.size, AudioTrack.WRITE_BLOCKING)
-                if (written < 0) break
+                if (written == AudioTrack.ERROR_DEAD_OBJECT && !rebuilt) {
+                    // The audio server restarted: a new track connects to the new one. Only once.
+                    rebuilt = true
+                    val fresh = newTrack(rate, piece)
+                    track.release()
+                    track = fresh
+                    fresh.play()
+                    continue
+                }
+                if (written < 0) {
+                    if (running.get()) report("Audio output failed (code $written)")
+                    break
+                }
                 framesPlayed += written / 2
             }
         } catch (_: InterruptedException) {
@@ -113,9 +110,31 @@ class AudioPlayer(private val ring: AudioRing, private val onError: (String) -> 
         }
     }
 
+    private fun newTrack(rate: Int, piece: Int): AudioTrack {
+        val minBytes = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
+        return AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build(),
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(rate)
+                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                    .build(),
+            )
+            .setBufferSizeInBytes(maxOf(minBytes, 4 * piece * BYTES_PER_FRAME))
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+    }
+
+    private fun report(e: RuntimeException) = report("Audio output failed: ${e.message ?: e.javaClass.simpleName}")
+
     /** Reports from another thread: the report stops this player, which must not wait for itself. */
-    private fun report(e: RuntimeException) {
-        val text = e.message ?: e.javaClass.simpleName
+    private fun report(text: String) {
         Thread({ onError(text) }, "audio-player-error").start()
     }
 
