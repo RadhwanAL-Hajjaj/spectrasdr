@@ -101,7 +101,7 @@ interface AudioSink {
 2. **DSP thread:** for every block, the spectrum analyzer and the active demodulator chain run; audio goes to the `AudioSink`; the newest `SpectrumFrame` is published to a latest-value slot.
 3. **UI/GL thread:** reads the latest frame at vsync; pushes waterfall rows to the GPU.
 
-`AudioSink.write` must return within a few milliseconds. `AndroidAudioSink` uses an AudioTrack (PCM float, about 150 ms buffer, non-blocking writes) behind a small ring buffer.
+`AudioSink.write` must return within a few milliseconds. The app's sink is `AudioRing` (stereo float, 150 ms target level, non-blocking writes), drained by `AudioPlayer`'s AudioTrack in 10 ms pieces.
 
 ### 4.4 Performance rules
 
@@ -257,7 +257,7 @@ Samples already inside the driver's USB buffers and the socket still belong to t
   - squelch (with auto), volume, gain controls per source type, S-meter (dBFS)
   - RDS strip (PS, RT, PI, PTY, stereo indicator), record audio/IQ, bookmark
 - **WaterfallView:** GLSurfaceView with OpenGL ES 3.0. An R8 ring texture (width ≤ 2,048 bins × 1,024 rows) receives one row per frame through `glTexSubImage2D`; dB values are normalised to 0–255 with the current range when written, and a fragment shader maps them through a palette lookup texture and applies the scroll offset. Range changes affect new rows. The spectrum trace is drawn in a Compose Canvas overlay.
-- **RadioService:** foreground service (`mediaPlayback`) that owns the `Receiver`; notification with play/stop, frequency, mode and RDS name; partial wake lock while running; Wi-Fi lock for network sources (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+, high-performance mode below); audio focus handling (pause for calls).
+- **RadioService:** foreground service (`mediaPlayback`) that owns the `Receiver`; notification with play/stop, frequency, mode and RDS name; partial wake lock while running; Wi-Fi lock for network sources (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+, high-performance mode below); audio focus handling (a transient loss such as a call pauses and resumes; a permanent loss stops the session with a message).
 - **Background survival:** on first background use, if the app is battery-optimised, a one-time prompt explains why and opens the system battery settings so the user can set the app to Unrestricted (Samsung's sleeping-apps lists can otherwise stop long listening sessions).
 - **Diagnostics:** Settings → Diagnostics shows the benchmark (§4.4), overrun and drop counters, the measured retune latency and recent errors, with a "Share report" button.
 - **Persistence:** Room for channels, lists, servers, saved sweeps and the activity log; SharedPreferences for settings and last state (read synchronously at start, no extra library).
@@ -302,7 +302,7 @@ All errors reach the user as plain-language messages, with technical detail in l
 | Recording | WAV round trip; header valid after a simulated crash; file-name parsing |
 | Throughput | WFM stereo + RDS chain at 2.4 MS/s runs ≥ 3× real time on the JVM |
 
-**CI (GitHub Actions):** `./gradlew :core:test :app:assembleRelease :app:lintRelease` on every push. The installable test build is the release build type (not debuggable, because a debuggable app runs its signal processing several times slower) signed with a public test key committed to the repository, so each test build installs over the previous one. Every push publishes it to the pre-release "Latest test build" (tag `test-build`); tags `v*` will build a properly signed release (Plan 7).
+**CI (GitHub Actions):** `./gradlew :core:test :app:assembleRelease :app:lintRelease` on every push. The installable test build is the release build type (not debuggable, because a debuggable app runs its signal processing several times slower) signed with a public test key committed to the repository, so each test build installs over the previous one. Every push publishes it to the pre-release "Latest test build" (tag `test-build`); tags `v*` will build a properly signed release (milestone 5).
 
 **Emulator tests (GitHub Actions, Android emulator with KVM):** instrumented tests start the app against an in-test fake rtl_tcp server, a stand-in driver app that answers `iqsrc://`, and the `SimulatorSource`, then check that the receiver tunes, plays audio, shows the RDS name, reconnects after a lost connection (later plans: runs a sweep and completes a scan). The tests run against the release build type. Screenshots are attached to the "Latest test build" pre-release, and failures are printed in the job log, where `tools/ci-wait.sh` reads them.
 

@@ -12,7 +12,7 @@ on the network, or from the built-in simulator. The waterfall, sweep, scanner an
 Every push builds an APK and publishes it on the
 [Latest test build](https://github.com/RadhwanAL-Hajjaj/spectrasdr/releases/tag/test-build) page.
 It is not a release: it can be incomplete. It is signed with a public test key, so each test build
-installs over the previous one (and over nothing else).
+installs over the previous one; it cannot update a build signed with another key.
 
 To use an RTL-SDR dongle, install the free "SDR driver" app (by SignalWare); SpectraSDR starts it
 when you pick "USB dongle".
