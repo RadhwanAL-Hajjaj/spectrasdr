@@ -1,0 +1,115 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Checks the wrapper jar against Gradle's published checksums and caches Gradle's files.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build, test and lint
+        shell: bash
+        run: ./gradlew :core:test :app:assembleRelease :app:lintRelease --stacktrace 2>&1 | tee build.log
+
+      - name: Point out what failed
+        if: failure()
+        shell: bash
+        run: |
+          # The first lines that explain the failure become annotations on the run.
+          grep -E "^e: |^w: .*error|error:|FAILED|> Could not|What went wrong|Caused by:|^\* What|Tests? .*failed|There were failing tests" build.log \
+            | head -9 | while IFS= read -r line; do echo "::error::${line}"; done
+          awk '/What went wrong/{f=1} f{print} /Try:/{exit}' build.log | head -25 | tr '\n' ' ' | cut -c1-900 | sed 's/^/::error title=What went wrong::/'
+          echo
+
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            build.log
+            app/build/reports/lint-results-release.html
+            core/build/reports/tests/test
+          if-no-files-found: ignore
+
+      - name: Keep the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: spectrasdr-apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish the test build
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk spectrasdr-test.apk
+          notes="Automatic test build from branch \`${{ github.ref_name }}\`, commit ${{ github.sha }}, $(date -u '+%Y-%m-%d %H:%M UTC'). Not a release: it can be incomplete or broken. Signed with the project's public test key."
+          if gh release view test-build >/dev/null 2>&1; then
+            gh release upload test-build spectrasdr-test.apk --clobber
+            gh release edit test-build --notes "$notes"
+          else
+            gh release create test-build spectrasdr-test.apk --prerelease --title "Latest test build" --notes "$notes" --target "${{ github.sha }}"
+          fi
+
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Checks the wrapper jar against Gradle's published checksums and caches Gradle's files.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run the tests on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb logcat -c
+            ./gradlew :app:connectedAndroidTest --stacktrace; code=$?; adb pull /sdcard/Download shots; adb logcat -d -s SPECTRA:W AndroidRuntime:E | tail -n 60; grep -h -A 14 "<failure" app/build/outputs/androidTest-results/connected/*/*.xml | cut -c1-400 | head -n 90; exit $code
+
+      - name: Publish the screenshots
+        if: always() && github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la shots/ || exit 0
+          gh release upload test-build shots/*.png --clobber

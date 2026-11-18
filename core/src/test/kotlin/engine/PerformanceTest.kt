@@ -8,6 +8,7 @@ import io.github.radhwanalhajjaj.spectrasdr.core.spectrum.SpectrumAnalyzer
 import io.github.radhwanalhajjaj.spectrasdr.core.testutil.TestStations
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.lang.management.ManagementFactory
 
@@ -56,7 +57,9 @@ class PerformanceTest {
 
     @Test
     fun theSignalPathAllocatesNothingOnceItRuns() {
-        val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean ?: return   // not measurable on this JVM
+        val bean = ManagementFactory.getThreadMXBean() as? com.sun.management.ThreadMXBean
+        assumeTrue("this JVM cannot count a thread's allocations", bean != null && bean.isThreadAllocatedMemorySupported)
+        bean!!
         val thread = Thread.currentThread().id
         val rate = 960_000
         val station = SimStation.FmBroadcast(100_100_000, "ALLOC FM", "No garbage")

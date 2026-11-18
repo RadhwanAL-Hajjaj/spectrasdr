@@ -254,6 +254,20 @@ class ReceiverTest {
     }
 
     @Test
+    fun theHostIsToldAboutTheSourceAndDspThreadsFromThoseThreads() {
+        val seen = java.util.concurrent.ConcurrentHashMap<ThreadRole, String>()
+        val source = ScriptedSource()
+        val r = Receiver(source, CollectingSink(), ReceiverSettings(100_000_000, 240_000, Mode.NFM), object : ReceiverListener {}) { role ->
+            seen[role] = Thread.currentThread().name
+        }
+        r.start()
+        await("both threads") { seen.size == 2 }
+        r.stop()
+        assertEquals("receiver-dsp", seen[ThreadRole.DSP])
+        assertEquals("scripted-source", seen[ThreadRole.SOURCE])
+    }
+
+    @Test
     fun aSourceErrorIsReportedAndEndsTheSession() {
         val source = ScriptedSource()
         val (r, events) = start(source, ReceiverSettings(100_000_000, 240_000))

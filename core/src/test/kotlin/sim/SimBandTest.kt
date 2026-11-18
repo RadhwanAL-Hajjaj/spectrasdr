@@ -66,9 +66,10 @@ class SimBandTest {
             chain.process(block, 16_384)
         }
         assertTrue(chain.stereo)
-        assertEquals(0xD3B2, chain.rds!!.state.pi)
-        assertEquals("SIM FM  ", chain.rds!!.state.ps)
-        assertEquals("Simulated text", chain.rds!!.state.rt)
+        val rds = chain.rds!!.state
+        assertEquals(0xD3B2, rds.pi)
+        assertEquals("SIM FM  ", rds.ps)
+        assertEquals("Simulated text", rds.rt)
         val audio = sink.audio()
         val frames = sink.frames
         val left = Signals.toneAmplitude(audio, 1_000.0, 48_000.0, frames / 2, frames, 2, 0)

@@ -248,31 +248,24 @@ class RtlTcpClientTest {
     }
 
     @Test
-    fun aListenerThatFailsAfterReleasingItsBlockIsReportedAsItself() {
+    fun aListenerThatFailsEndsTheStreamWithItsOwnError() {
         val uncaught = AtomicReference<Throwable>()
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { _, e -> uncaught.set(e) }
         try {
             FakeRtlTcpServer().start().use { server ->
-                val stopped = CountDownLatch(1)
-                val c = client(server.port)
-                c.open(object : SourceListener {
-                    override fun onStarted(info: SourceInfo) {}
-
+                val l = object : CollectingListener() {
                     override fun onBlock(block: IqBlock) {
                         block.release()
                         throw IllegalStateException("listener failed")
                     }
-
-                    override fun onError(error: SourceError) {}
-
-                    override fun onStopped() = stopped.countDown()
-                })
-                assertTrue(stopped.await(5, SECONDS))
-                val deadline = System.currentTimeMillis() + 5_000
-                while (uncaught.get() == null && System.currentTimeMillis() < deadline) Thread.sleep(5)
-                // Before the fix the reader released the block a second time and that error hid this one.
-                assertEquals("listener failed", uncaught.get()?.message)
+                }
+                val c = client(server.port)
+                c.open(l)
+                assertTrue(l.stopped.await(5, SECONDS))
+                // Reported, not left to end the process; and not hidden by a second release of the block.
+                assertEquals("Unexpected error: listener failed", (l.errors.single() as SourceError.Io).message)
+                assertEquals(null, uncaught.get())
                 c.close()
             }
         } finally {
@@ -291,6 +284,20 @@ class RtlTcpClientTest {
             assertTrue(l.errors.single() is SourceError.ConnectFailed)
             c.close()
             accepted.join(1_000)
+        }
+    }
+
+    @Test
+    fun aClientClosedRightAfterOpeningEndsQuietly() {
+        repeat(20) {
+            FakeRtlTcpServer().start().use { server ->
+                val l = CollectingListener()
+                val c = client(server.port)
+                c.open(l)
+                c.close()   // can run before the reader thread has made its socket
+                assertTrue("the reader ended (round $it)", l.stopped.await(5, SECONDS))
+                assertTrue(l.errors.isEmpty())
+            }
         }
     }
 }

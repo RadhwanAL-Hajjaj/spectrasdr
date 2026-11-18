@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-12
 - **Status:** Design approved in chat; this written spec awaits review
-- **Revised:** 2026-11-14 — §4.1, §4.2, §4.3, §6.3, §6.4, §7.1 and §11 aligned with the engine as built (Plans 1 and 2)
+- **Revised:** 2026-11-14 — §4.1, §4.2, §4.3, §6.3, §6.4, §7.1 and §11 aligned with the engine as built (Plans 1 and 2); 2026-11-17 — D9, §4.1, §4.3, §10, §12 and §14 aligned with the first Android app (Plan 3a)
 - **License:** GPL-3.0-or-later
 - **Working name:** SpectraSDR (renamable before first release)
 
@@ -30,7 +30,7 @@ Primary test device: Samsung Galaxy S24 Ultra (arm64, Android 14+) with an RTL-S
 | D6 | `:core` module uses the **Kotlin standard library only** (no coroutines, no Android) | Builds and tests in the development workspace, which cannot reach Maven; keeps the engine portable |
 | D7 | Android code is compiled and linted by **GitHub Actions** | The workspace cannot reach Google's Maven repository |
 | D8 | Jetpack Compose + Material 3; OpenGL ES 3.0 for the waterfall | Native Android look; waterfall needs per-row GPU updates |
-| D9 | minSdk 26, targetSdk/compileSdk 36 | OpenRSP needs Android 8.0+; current Play target-API rules |
+| D9 | minSdk 26, targetSdk 36, compileSdk 37 | OpenRSP needs Android 8.0+; current Play target-API rules; Compose 1.12 needs API 37 to compile |
 | D10 | applicationId `io.github.radhwanalhajjaj.spectrasdr` | GitHub-namespace convention for open-source apps |
 
 ## 3. Scope
@@ -56,9 +56,12 @@ Primary test device: Samsung Galaxy S24 Ultra (arm64, Android 14+) with an RTL-S
 | `sweep` | `SweepPlanner`, `SweepEngine`, `SweepResult`, CSV export |
 | `scan` | `Channel`, `ScanList`, `Scanner` state machine, `ActivityLog` |
 | `record` | `WavWriter` (crash-safe), `IqRecorder`, `AudioRecorder`, file naming and parsing |
-| `engine` | `Receiver` orchestrator, `ReceiverChain` (channelizer → demodulator → squelch → audio output), `TuningPolicy`, `AudioSink` interface, listener interfaces |
+| `engine` | `Receiver` orchestrator, `ReceiverChain` (channelizer → demodulator → squelch → audio output), `TuningPolicy`, `AudioSink` interface, listener interfaces, `ThreadHook` (lets the app raise the source and DSP threads' priority) |
+| `audio` | `AudioRing`: the non-blocking buffer between the DSP thread and the device's audio thread; plays silence until it is back at its target level |
+| `session` | `RadioSession` (start, stop, settings that outlive a session, reconnection with back-off), `SourceSpec`, `SessionState`, plain-language error texts, `DriverUri` (the `iqsrc` address) |
+| `display` | `FrequencyText` (readout digits, typed megahertz, locale-independent numbers), `SpectrumScale` (frequency and level mapping, column reduction) |
 
-**`:app`** — Android: Compose UI, `RadioService` (foreground, `mediaPlayback` type), `DriverLauncher` (`iqsrc` hand-off), `AndroidAudioSink` (AudioTrack), `WaterfallView` (GLSurfaceView), persistence (Room + DataStore), recordings browser (FileProvider sharing).
+**`:app`** — Android: Compose UI, `Radio` (the process-wide holder of the `RadioSession`, with its state as flows), `RadioService` (foreground, `mediaPlayback` type), `DriverStarter` (`iqsrc` hand-off), `AudioPlayer` (AudioTrack fed from `AudioRing`), `WaterfallView` (GLSurfaceView), persistence (Room + SharedPreferences), recordings browser (FileProvider sharing).
 
 **`:openrsp`** (phase 2) — NDK/C++ JNI bridge to OpenRSP, exposing `OpenRspSource : IqSource`.
 
@@ -94,11 +97,11 @@ interface AudioSink {
 
 ### 4.3 Threads and data flow
 
-1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (16,384 complex samples each, tagged with a monotonically increasing `seq`, the `tuneEpoch` (§7.1), `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments. From Plan 3 on, a source delivers a block when it is full or holds about 20 ms of samples (sample rate / 50), whichever comes first, and the queue is sized by duration, so audio and spectrum frames stay smooth at low sample rates (a full block is 68 ms at 240 kS/s).
+1. **Source thread** (one per source): blocking reads → conversion to interleaved float IQ in pooled `IqBlock`s (up to 16,384 complex samples each, tagged with a monotonically increasing `seq`, the `tuneEpoch` (§7.1), `centerHz`, `sampleRate`) → bounded queue holding about 0.5 s. When full, the oldest block is dropped and `overruns` increments. A source delivers a block when it is full or holds about 20 ms of samples (sample rate / 50, at least 256), whichever comes first, and the queue is sized by duration, so audio and spectrum frames stay smooth at low sample rates (a full block would be 68 ms at 240 kS/s).
 2. **DSP thread:** for every block, the spectrum analyzer and the active demodulator chain run; audio goes to the `AudioSink`; the newest `SpectrumFrame` is published to a latest-value slot.
 3. **UI/GL thread:** reads the latest frame at vsync; pushes waterfall rows to the GPU.
 
-`AudioSink.write` must return within a few milliseconds. `AndroidAudioSink` uses an AudioTrack (PCM float, about 150 ms buffer, non-blocking writes) behind a small ring buffer.
+`AudioSink.write` must return within a few milliseconds. The app's sink is `AudioRing` (stereo float, 150 ms target level, non-blocking writes), drained by `AudioPlayer`'s AudioTrack in 10 ms pieces.
 
 ### 4.4 Performance rules
 
@@ -254,10 +257,11 @@ Samples already inside the driver's USB buffers and the socket still belong to t
   - squelch (with auto), volume, gain controls per source type, S-meter (dBFS)
   - RDS strip (PS, RT, PI, PTY, stereo indicator), record audio/IQ, bookmark
 - **WaterfallView:** GLSurfaceView with OpenGL ES 3.0. An R8 ring texture (width ≤ 2,048 bins × 1,024 rows) receives one row per frame through `glTexSubImage2D`; dB values are normalised to 0–255 with the current range when written, and a fragment shader maps them through a palette lookup texture and applies the scroll offset. Range changes affect new rows. The spectrum trace is drawn in a Compose Canvas overlay.
-- **RadioService:** foreground service (`mediaPlayback`) that owns the `Receiver`; notification with play/stop, frequency, mode and RDS name; partial wake lock while running; Wi-Fi lock for network sources (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+, high-performance mode below); audio focus handling (pause for calls).
+- **RadioService:** foreground service (`mediaPlayback`) that keeps the process in the foreground while the process-wide `Radio` (which owns the `RadioSession`) plays, and follows its state; notification with a Stop action, frequency, mode and RDS name; partial wake lock while running; Wi-Fi lock for network sources (`WIFI_MODE_FULL_LOW_LATENCY` on API 29+, high-performance mode below); audio focus handling (a transient loss such as a call pauses and resumes; a permanent loss stops the session with a message).
 - **Background survival:** on first background use, if the app is battery-optimised, a one-time prompt explains why and opens the system battery settings so the user can set the app to Unrestricted (Samsung's sleeping-apps lists can otherwise stop long listening sessions).
 - **Diagnostics:** Settings → Diagnostics shows the benchmark (§4.4), overrun and drop counters, the measured retune latency and recent errors, with a "Share report" button.
-- **Persistence:** Room for channels, lists, servers, saved sweeps and the activity log; DataStore for settings and last state.
+- **Persistence:** Room for channels, lists, servers, saved sweeps and the activity log; SharedPreferences for settings and last state (read synchronously at start, no extra library).
+- **Numbers on screen:** frequencies, levels and rates are formatted with `Locale.ROOT`, so they show Western digits and a decimal point whatever the device's language.
 - **Permissions:** INTERNET, ACCESS_NETWORK_STATE, ACCESS_WIFI_STATE, WAKE_LOCK, FOREGROUND_SERVICE, FOREGROUND_SERVICE_MEDIA_PLAYBACK, POST_NOTIFICATIONS (runtime on Android 13+). No location or storage permissions.
 - **Look:** dark-first Material 3; portrait and landscape layouts; works on tablets.
 
@@ -298,9 +302,9 @@ All errors reach the user as plain-language messages, with technical detail in l
 | Recording | WAV round trip; header valid after a simulated crash; file-name parsing |
 | Throughput | WFM stereo + RDS chain at 2.4 MS/s runs ≥ 3× real time on the JVM |
 
-**CI (GitHub Actions):** `./gradlew :core:test :app:assembleDebug :app:lintDebug` on every push, debug APK uploaded as an artifact; tags `v*` build a release APK.
+**CI (GitHub Actions):** `./gradlew :core:test :app:assembleRelease :app:lintRelease` on every push. The installable test build is the release build type (not debuggable, because a debuggable app runs its signal processing several times slower) signed with a public test key committed to the repository, so each test build installs over the previous one. Every push publishes it to the pre-release "Latest test build" (tag `test-build`); tags `v*` will build a properly signed release (milestone 5).
 
-**Emulator tests (GitHub Actions, Android emulator with KVM):** instrumented tests start the app against an in-test fake rtl_tcp server and the `SimulatorSource`, then check that the receiver tunes, plays audio, shows the RDS name, runs a sweep and completes a scan; screenshots of each screen are saved as build artifacts. Whether Claude can read build logs and artifacts directly is confirmed when the repository is attached; otherwise the user forwards them.
+**Emulator tests (GitHub Actions, Android emulator with KVM):** instrumented tests start the app against an in-test fake rtl_tcp server, a stand-in driver app that answers `iqsrc://`, and the `SimulatorSource`, then check that the receiver tunes, plays audio, shows the RDS name, reconnects after a lost connection (later plans: runs a sweep and completes a scan). The tests run against the release build type. Screenshots are attached to the "Latest test build" pre-release, and failures are printed in the job log, where `tools/ci-wait.sh` reads them.
 
 **Simulator source:** `SimulatorSource` reuses the test signal generators to produce a band with FM stations (stereo + RDS), NFM bursts, AM, SSB and CW signals, so the whole app runs in the emulator and on any phone without hardware.
 
@@ -318,7 +322,9 @@ All errors reach the user as plain-language messages, with technical detail in l
 Each milestone ends in a working, tested state.
 
 1. **Core engine** — sources (rtl_tcp/rsp_tcp client, IQ files, simulator), `RetuneSync`, DSP blocks, all demodulators, stereo, RDS, spectrum analyzer, `Receiver`; full unit tests and throughput test pass in the workspace.
-2. **Android receiver** — Gradle project, CI and emulator tests, driver hand-off, network sources, `RadioService`, audio sink, receiver screen with spectrum and GL waterfall, diagnostics and benchmark. First installable APK.
+2. **Android receiver**, in two plans:
+   - **2a (Plan 3a)** — Gradle project, CI and emulator tests, driver hand-off, network sources with reconnection, `RadioService`, audio output, receiver screen with spectrum, frequency readout, modes, levels, gains and RDS. First installable APK.
+   - **2b (Plan 3b)** — GL waterfall, spectrum gestures (pinch, drag, double-tap), diagnostics and benchmark, performance-hint session, battery-optimisation prompt, start on dongle attach, sample-rate step-down on a slow network.
 3. **Sweep analyzer** — engine, screen, saved sweeps, CSV export.
 4. **Scanner and recording** — channel lists, memory scan and range search, activity log, audio/IQ recording, recordings browser, IQ playback.
 5. **Polish** — settings, error states, landscape/tablet layouts, README and release build.

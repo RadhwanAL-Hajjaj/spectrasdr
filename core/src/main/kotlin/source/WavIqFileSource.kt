@@ -63,7 +63,7 @@ class WavIqFileSource(
                 return
             }
             RandomAccessFile(file, "r").use { raf ->
-                val bytes = ByteArray(blockSize * format.bytesPerComplex)
+                val bytes = ByteArray(BlockSizing.samplesPerBlock(wav.sampleRate, blockSize) * format.bytesPerComplex)
                 var seq = 0L
                 var emitted = 0L
                 val startNs = System.nanoTime()
